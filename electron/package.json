@@ -1,0 +1,77 @@
+{
+  "name": "smart-pos",
+  "version": "3.0.9",
+  "description": "Smart POS System",
+  "main": "main.js",
+  "author": "UniPro Solutions",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.smartpos.pos",
+    "productName": "Smart POS",
+    "directories": {
+      "output": "../installer-output"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "splash.html",
+      "station-setup.html",
+      "icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!node_modules/**/*",
+          "!logs/*",
+          "!.git/*",
+          "!*.bak*",
+          "!*.backup*",
+          "!*.dpapi*",
+          "!.env.key*",
+          "!.env.bak*"
+        ]
+      },
+      {
+        "from": "../backend/node_modules",
+        "to": "backend/node_modules"
+      },
+      {
+        "from": "C:/Program Files/nodejs/node.exe",
+        "to": "bin/node.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Smart POS",
+      "uninstallDisplayName": "Smart POS",
+      "include": "installer.nsh"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  }
+}

@@ -1,0 +1,4 @@
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+WshShell.Run "node scripts\run-customer-display.js", 0, False
+Set WshShell = Nothing

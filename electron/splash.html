@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UniPro POS Loading</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      color: #f8fafc;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+    }
+
+    .container {
+      text-align: center;
+      padding: 30px;
+    }
+
+    .logo-container {
+      position: relative;
+      margin-bottom: 24px;
+      display: inline-block;
+    }
+
+    .logo {
+      width: 80px;
+      height: 80px;
+      border-radius: 20px;
+      box-shadow: 0 10px 25px -5px rgba(99, 102, 241, 0.5);
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 6px;
+      background: linear-gradient(to right, #ffffff, #c7d2fe);
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    p.subtitle {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+    }
+
+    .loader-track {
+      width: 240px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+      overflow: hidden;
+      margin: 0 auto 16px auto;
+      position: relative;
+    }
+
+    .loader-bar {
+      width: 50%;
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #a855f7);
+      border-radius: 9999px;
+      position: absolute;
+      animation: indeterminate 1.5s infinite ease-in-out;
+    }
+
+    @keyframes indeterminate {
+      0% {
+        left: -50%;
+        width: 30%;
+      }
+
+      50% {
+        left: 30%;
+        width: 60%;
+      }
+
+      100% {
+        left: 100%;
+        width: 30%;
+      }
+    }
+
+    .status {
+      font-size: 12px;
+      color: #818cf8;
+      font-weight: 500;
+      min-height: 18px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="logo-container">
+      <img src="icon.png" class="logo" alt="Smart POS Logo" onerror="this.style.display='none'">
+    </div>
+    <h1>Smart POS</h1>
+    <p class="subtitle">Restaurant Point of Sale System</p>
+    <div class="loader-track">
+      <div class="loader-bar"></div>
+    </div>
+    <div id="statusText" class="status">Connecting to local database and services...</div>
+  </div>
+  <script>
+    const messages = [
+      "Starting backend services...",
+      "Connecting to Local MS SQL Database...",
+      "Initializing table layouts and sync...",
+      "Preparing POS Terminal..."
+    ];
+    let idx = 0;
+    setInterval(() => {
+      idx = (idx + 1) % messages.length;
+      document.getElementById('statusText').innerText = messages[idx];
+    }, 1800);
+  </script>
+</body>
+
+</html>

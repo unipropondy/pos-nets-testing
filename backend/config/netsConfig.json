@@ -1,0 +1,12 @@
+{
+  "terminalIp": "192.168.9.38",
+  "terminalPort": 7500,
+  "financialTimeoutMs": 120000,
+  "adminTimeoutMs": 35000,
+  "connectionTimeoutMs": 10000,
+  "merchantId": "",
+  "terminalId": "",
+  "ecrRefFieldCode": "HD",
+  "autoRetryWithSameEcn": true,
+  "lastApprovedQueryOnTimeout": true
+}

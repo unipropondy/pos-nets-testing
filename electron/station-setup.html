@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UniPro POS - Station Setup</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(135deg, #090d16 0%, #111827 50%, #1e1b4b 100%);
+      color: #f8fafc;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      overflow-y: auto;
+    }
+    .card {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 540px;
+      padding: 32px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .logo {
+      width: 64px;
+      height: 64px;
+      border-radius: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 8px 20px -4px rgba(99, 102, 241, 0.4);
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 6px;
+    }
+    p.desc {
+      font-size: 13px;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+    .my-ip-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      color: #a5b4fc;
+      margin-top: 8px;
+    }
+    .role-options {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .role-card {
+      border: 2px solid rgba(255, 255, 255, 0.1);
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 12px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .role-card:hover {
+      border-color: rgba(99, 102, 241, 0.5);
+      background: rgba(15, 23, 42, 0.85);
+    }
+    .role-card.selected {
+      border-color: #6366f1;
+      background: rgba(99, 102, 241, 0.12);
+      box-shadow: 0 0 0 1px #6366f1;
+    }
+    .radio-circle {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 2px solid #64748b;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .role-card.selected .radio-circle {
+      border-color: #6366f1;
+    }
+    .radio-circle::after {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #6366f1;
+      opacity: 0;
+      transform: scale(0.6);
+      transition: all 0.15s ease;
+    }
+    .role-card.selected .radio-circle::after {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .role-text h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 3px;
+    }
+    .role-text p {
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.4;
+    }
+    .client-inputs {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 20px;
+      display: none;
+    }
+    .client-inputs.active {
+      display: block;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #f8fafc;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-family: monospace;
+      outline: none;
+      transition: border 0.15s;
+    }
+    input[type="text"]:focus, input[type="number"]:focus {
+      border-color: #6366f1;
+    }
+    .btn-test {
+      background: #334155;
+      color: #f1f5f9;
+      border: none;
+      padding: 0 16px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn-test:hover {
+      background: #475569;
+    }
+    .test-result {
+      font-size: 12px;
+      margin-top: 8px;
+      display: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+    }
+    .test-result.success {
+      display: block;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+    .test-result.error {
+      display: block;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #f87171;
+    }
+    .test-result.testing {
+      display: block;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      color: #a5b4fc;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .btn-primary {
+      flex: 1;
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4);
+    }
+    .btn-primary:hover {
+      opacity: 0.95;
+    }
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+    .btn-secondary {
+      background: transparent;
+      color: #94a3b8;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-secondary:hover {
+      color: white;
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .notice {
+      text-align: center;
+      font-size: 11px;
+      color: #64748b;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <img src="icon.png" class="logo" alt="UniPro POS" onerror="this.style.display='none'">
+      <h1>POS Station Configuration</h1>
+      <p class="desc">Select how this computer will function in your network setup.</p>
+      <div id="myIpBadge" class="my-ip-badge" style="display: none;">
+        <span>📡 This PC's Local IP:</span> <strong id="myIpText">Checking...</strong>
+      </div>
+    </div>
+
+    <div class="role-options">
+      <!-- Option 1: Main Server -->
+      <div class="role-card selected" id="cardServer" onclick="selectRole('server')">
+        <div class="radio-circle"></div>
+        <div class="role-text">
+          <h3>🖥️ Main Server Station (Cashier 1)</h3>
+          <p>Runs the local database & server on this PC. All other terminals connect to this computer.</p>
+        </div>
+      </div>
+
+      <!-- Option 2: Client Terminal -->
+      <div class="role-card" id="cardClient" onclick="selectRole('client')">
+        <div class="radio-circle"></div>
+        <div class="role-text">
+          <h3>💻 Client Terminal (Cashier 2 / Waiter / KDS)</h3>
+          <p>Connects over Wi-Fi / LAN to the Main Server PC. No local database needed on this machine.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Client Config Inputs -->
+    <div class="client-inputs" id="clientInputs">
+      <div class="form-group">
+        <label for="serverHost">Main Server IP Address</label>
+        <div class="input-row">
+          <input type="text" id="serverHost" placeholder="e.g. 192.168.0.229" value="">
+          <button type="button" class="btn-test" id="btnTest" onclick="testConnection()">Test</button>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top: 10px;">
+        <label for="serverPort">Server Port (Default: 3000)</label>
+        <input type="number" id="serverPort" value="3000" style="width: 120px;">
+      </div>
+      <div id="testResult" class="test-result"></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="btnSave" onclick="saveConfiguration()">Save & Connect</button>
+      <button class="btn-secondary" id="btnCancel" onclick="cancelSetup()">Cancel</button>
+    </div>
+
+    <p class="notice">💡 You can re-open this configuration anytime by pressing <strong>Ctrl + Shift + S</strong>.</p>
+  </div>
+
+  <script>
+    let currentRole = 'server';
+    let currentConfig = { mode: 'server', serverHost: 'localhost', serverPort: 3000 };
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      // 1. Get Local IP of this PC
+      if (window.electronAPI && window.electronAPI.getLocalNetworkIPs) {
+        try {
+          const ips = await window.electronAPI.getLocalNetworkIPs();
+          if (ips && ips.length > 0) {
+            document.getElementById('myIpText').innerText = ips.join(', ');
+            document.getElementById('myIpBadge').style.display = 'inline-flex';
+          }
+        } catch (_) {}
+      }
+
+      // 2. Load Existing Station Config
+      if (window.electronAPI && window.electronAPI.getStationConfig) {
+        try {
+          currentConfig = await window.electronAPI.getStationConfig();
+          if (currentConfig.mode === 'client') {
+            selectRole('client');
+            document.getElementById('serverHost').value = currentConfig.serverHost || '';
+            document.getElementById('serverPort').value = currentConfig.serverPort || 3000;
+          } else {
+            selectRole('server');
+          }
+        } catch (_) {}
+      }
+    });
+
+    function selectRole(role) {
+      currentRole = role;
+      const cardServer = document.getElementById('cardServer');
+      const cardClient = document.getElementById('cardClient');
+      const clientInputs = document.getElementById('clientInputs');
+
+      if (role === 'server') {
+        cardServer.classList.add('selected');
+        cardClient.classList.remove('selected');
+        clientInputs.classList.remove('active');
+      } else {
+        cardServer.classList.remove('selected');
+        cardClient.classList.add('selected');
+        clientInputs.classList.add('active');
+        document.getElementById('serverHost').focus();
+      }
+    }
+
+    async function testConnection() {
+      const host = document.getElementById('serverHost').value.trim();
+      const port = parseInt(document.getElementById('serverPort').value, 10) || 3000;
+      const resultDiv = document.getElementById('testResult');
+
+      if (!host) {
+        resultDiv.className = 'test-result error';
+        resultDiv.innerText = '❌ Please enter the Main Server IP address.';
+        return false;
+      }
+
+      resultDiv.className = 'test-result testing';
+      resultDiv.innerText = `⏳ Testing connection to ${host}:${port}...`;
+
+      try {
+        let isOnline = false;
+        if (window.electronAPI && window.electronAPI.testServerConnection) {
+          const res = await window.electronAPI.testServerConnection(host, port);
+          isOnline = res.success;
+        } else {
+          // Direct browser fetch
+          const resp = await fetch(`http://${host}:${port}/health`, { method: 'GET', signal: AbortSignal.timeout(3000) });
+          isOnline = (resp.status === 200);
+        }
+
+        if (isOnline) {
+          resultDiv.className = 'test-result success';
+          resultDiv.innerText = `✅ Connected successfully! Main Server is online at ${host}:${port}.`;
+          return true;
+        } else {
+          resultDiv.className = 'test-result error';
+          resultDiv.innerText = `❌ Could not connect to ${host}:${port}. Check IP, Wi-Fi router, and ensure System A is turned on.`;
+          return false;
+        }
+      } catch (err) {
+        resultDiv.className = 'test-result error';
+        resultDiv.innerText = `❌ Connection failed: ${err.message}. Check Wi-Fi router and System A firewall.`;
+        return false;
+      }
+    }
+
+    async function saveConfiguration() {
+      const btn = document.getElementById('btnSave');
+      btn.innerText = 'Connecting...';
+      btn.disabled = true;
+
+      const host = document.getElementById('serverHost').value.trim() || 'localhost';
+      const port = parseInt(document.getElementById('serverPort').value, 10) || 3000;
+
+      if (currentRole === 'client') {
+        if (!host || host === 'localhost' || host === '127.0.0.1') {
+          alert('Please enter System A\'s local IP address (e.g. 192.168.0.229) for Client Terminal mode.');
+          btn.innerText = 'Save & Connect';
+          btn.disabled = false;
+          return;
+        }
+
+        const isOk = await testConnection();
+        if (!isOk) {
+          const proceed = confirm(`Could not establish connection to ${host}:${port}.\n\nDo you want to save this IP anyway and attempt connection?`);
+          if (!proceed) {
+            btn.innerText = 'Save & Connect';
+            btn.disabled = false;
+            return;
+          }
+        }
+      }
+
+      const newConfig = {
+        mode: currentRole,
+        serverHost: currentRole === 'server' ? 'localhost' : host,
+        serverPort: port
+      };
+
+      if (window.electronAPI && window.electronAPI.saveStationConfig) {
+        await window.electronAPI.saveStationConfig(newConfig);
+      } else {
+        alert('Configuration saved. Please restart the app.');
+      }
+    }
+
+    function cancelSetup() {
+      if (window.electronAPI && window.electronAPI.closeSetupWindow) {
+        window.electronAPI.closeSetupWindow();
+      }
+    }
+  </script>
+</body>
+</html>
