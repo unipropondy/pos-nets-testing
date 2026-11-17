@@ -47,4 +47,18 @@ try {
   process.exit(1);
 }
 
+// 4. Build dedicated customer QR distribution (backend/dist-qr)
+console.log('\nStep 4: Building dedicated customer QR frontend distribution...');
+try {
+  const nodeCmd = process.execPath;
+  execSync(`"${nodeCmd}" "${path.join(__dirname, 'build-qr.js')}"`, {
+    cwd: rootDir,
+    stdio: 'inherit'
+  });
+  console.log('Built customer QR distribution in backend/dist-qr successfully!');
+} catch (error) {
+  console.error('Error building QR distribution:', error.message);
+  process.exit(1);
+}
+
 console.log('\n=== Build & Dist process completed successfully! ===\n');

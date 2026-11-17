@@ -1,6 +1,7 @@
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const { getPool, poolPromise } = require('../config/db');
 const {
   buildNetsFrame,
   parseNetsFrame,
@@ -86,7 +87,75 @@ class NetsService {
   }
 
   /**
-   * Thread-safe / asynchronous-safe sequential ECN generator.
+   * Multi-process & multi-instance safe atomic ECN generator.
+   * Utilizes Microsoft SQL Server SEQUENCE / atomic counter table when database is online.
+   * Preserves exact 12-digit zero-padded format.
+   * Fails closed if SQL Server is unreachable, ensuring zero cross-process collision risk.
+   * Never silently resets or rolls over.
+   */
+  async getNextEcnAsync() {
+    let pool = getPool();
+    if (!pool || !pool.connected) {
+      try {
+        pool = await poolPromise;
+      } catch (_) {}
+    }
+
+    if (!pool || !pool.connected) {
+      const dbErr = new Error('NETS ECN generation failed: Database connection is unavailable. Cannot guarantee cross-process unique ECN.');
+      dbErr.code = 'ERR_NETS_ECN_DB_UNAVAILABLE';
+      throw dbErr;
+    }
+
+    try {
+      const query = `
+        BEGIN TRANSACTION;
+        DECLARE @nextEcn BIGINT;
+
+        IF EXISTS (SELECT * FROM sys.sequences WHERE name = 'NetsEcnSequence')
+        BEGIN
+          SELECT @nextEcn = NEXT VALUE FOR dbo.NetsEcnSequence;
+          UPDATE dbo.NetsEcnCounter
+          SET CurrentEcn = @nextEcn, UpdatedAt = GETDATE()
+          WHERE Id = 1;
+        END
+        ELSE
+        BEGIN
+          UPDATE dbo.NetsEcnCounter WITH (UPDLOCK, HOLDLOCK)
+          SET CurrentEcn = CurrentEcn + 1,
+              UpdatedAt = GETDATE()
+          WHERE Id = 1;
+
+          SELECT @nextEcn = CurrentEcn FROM dbo.NetsEcnCounter WHERE Id = 1;
+        END
+
+        COMMIT TRANSACTION;
+        SELECT @nextEcn AS ecn;
+      `;
+      const res = await pool.request().query(query);
+      if (res.recordset && res.recordset.length > 0 && res.recordset[0].ecn != null) {
+        const val = parseInt(res.recordset[0].ecn, 10);
+        if (val > 999999999999) {
+          const limitErr = new Error('NETS ECN sequence has reached its maximum limit (999999999999). Rollover requires manual administrative authorization.');
+          limitErr.code = 'ERR_NETS_ECN_MAX_LIMIT';
+          throw limitErr;
+        }
+        this.saveEcn(val);
+        return val.toString().padStart(12, '0');
+      }
+      throw new Error('Database returned empty or null ECN result');
+    } catch (err) {
+      if (err.message && err.message.includes('has reached its minimum or maximum value')) {
+        const rolloverErr = new Error('NETS ECN sequence limit reached (999999999999). Rollover blocked to prevent duplicate ECN reuse.');
+        rolloverErr.code = 'ERR_NETS_ECN_ROLLOVER_BLOCKED';
+        throw rolloverErr;
+      }
+      throw new Error(`NETS atomic ECN generation failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Thread-safe sequential ECN generator for isolated test or single-process recovery.
    * Atomically increments ECN and persists it.
    */
   getNextEcn() {
@@ -218,7 +287,7 @@ class NetsService {
    * FC 55: Request Terminal Status
    */
   async requestTerminalStatus() {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '55',
@@ -244,7 +313,7 @@ class NetsService {
    * Used for transaction inquiry and recovery
    */
   async getLastApprovedTransaction() {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '56',
@@ -270,7 +339,7 @@ class NetsService {
    * FC 80: NETS Logon
    */
   async logon() {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '80',
@@ -295,7 +364,7 @@ class NetsService {
    * FC 81: NETS Settlement
    */
   async settlement() {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '81',
@@ -325,7 +394,7 @@ class NetsService {
    * @param {string} [acquirer="DBS"]
    */
   async creditSettlement(acquirer = 'DBS') {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     // 6-character padded acquirer code as specified
     const acquirerPadded = acquirer.padEnd(6, ' ').slice(0, 6);
 
@@ -355,7 +424,7 @@ class NetsService {
    * FC 84: TMS / CTS Update
    */
   async tmsUpdate() {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '84',
@@ -390,7 +459,7 @@ class NetsService {
     }
 
     this.isProcessing = true;
-    const ecn = retrySameEcn || this.getNextEcn();
+    const ecn = retrySameEcn || await this.getNextEcnAsync();
     const amountStr = formatAmount(amount);
     const cashbackStr = '000000000000';
     const txnType = isQr ? '04' : '01';
@@ -514,7 +583,7 @@ class NetsService {
    * FC Q1: Request QR Payload for POS Display
    */
   async requestQrPayload({ amount, ecrRef }) {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const amountStr = formatAmount(amount);
     const refNum = (ecrRef || `ECR${Date.now()}`).toString().slice(0, 20);
     const refCode = (this.config.ecrRefFieldCode || 'HD').toUpperCase().slice(0, 2);
@@ -549,7 +618,7 @@ class NetsService {
    * FC Q2: Complete QR Payment after display
    */
   async qrPayment({ amount, qrPayload, ecrRef }) {
-    const ecn = this.getNextEcn();
+    const ecn = await this.getNextEcnAsync();
     const amountStr = formatAmount(amount);
     const refNum = (ecrRef || `ECR${Date.now()}`).toString().slice(0, 20);
     const refCode = (this.config.ecrRefFieldCode || 'HD').toUpperCase().slice(0, 2);

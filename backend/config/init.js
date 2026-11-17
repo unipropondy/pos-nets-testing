@@ -1890,6 +1890,77 @@ async function initDB(pool) {
 
     console.log("✅ Database schema and performance indexes are up to date. (Rewards system active)");
 
+    // --- 9. NETS ECR II Electronic Sequence & Counter ---
+    // Safe initialization: If table/sequence already exists, it is NEVER recreated or reset.
+    // NO CYCLE is strictly enforced to prevent silent reuse of old ECNs without manual intervention.
+    // Restore Reconciliation: Checks disk backup high-water mark and advances BOTH table & sequence forward.
+    let diskEcn = 1;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const diskPath = path.join(__dirname, 'netsEcn.json');
+      if (fs.existsSync(diskPath)) {
+        const raw = JSON.parse(fs.readFileSync(diskPath, 'utf8'));
+        diskEcn = parseInt(raw.ecn, 10) || 1;
+      }
+    } catch (_) {}
+
+    await runQuery("Create & Reconcile NetsEcnSequence & NetsEcnCounter", `
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'NetsEcnCounter')
+      BEGIN
+        CREATE TABLE dbo.NetsEcnCounter (
+          Id INT NOT NULL PRIMARY KEY DEFAULT 1,
+          CurrentEcn BIGINT NOT NULL DEFAULT 1,
+          UpdatedAt DATETIME NOT NULL DEFAULT GETDATE(),
+          CONSTRAINT CK_NetsEcnCounter_SingleRow CHECK (Id = 1)
+        );
+        INSERT INTO dbo.NetsEcnCounter (Id, CurrentEcn, UpdatedAt)
+        VALUES (1, 1, GETDATE());
+      END
+
+      IF NOT EXISTS (SELECT * FROM sys.sequences WHERE name = 'NetsEcnSequence')
+      BEGIN
+        CREATE SEQUENCE dbo.NetsEcnSequence
+          AS BIGINT
+          START WITH 1
+          INCREMENT BY 1
+          MINVALUE 1
+          MAXVALUE 999999999999
+          NO CYCLE;
+      END
+      ELSE
+      BEGIN
+        -- Ensure NO CYCLE is enforced on existing sequence to prevent silent rollover collisions
+        ALTER SEQUENCE dbo.NetsEcnSequence NO CYCLE;
+      END
+
+      -- RESTORE RECONCILIATION:
+      -- Ensure sequence and counter never regress below either:
+      -- 1) Restored database counter
+      -- 2) Current sequence value
+      -- 3) Local disk high-water mark (${diskEcn})
+      DECLARE @curSeqVal BIGINT;
+      SELECT @curSeqVal = CAST(current_value AS BIGINT) FROM sys.sequences WHERE name = 'NetsEcnSequence';
+      
+      DECLARE @curTblVal BIGINT;
+      SELECT @curTblVal = CurrentEcn FROM dbo.NetsEcnCounter WHERE Id = 1;
+
+      DECLARE @targetVal BIGINT = ${diskEcn};
+      IF @curTblVal > @targetVal SET @targetVal = @curTblVal;
+      IF @curSeqVal > @targetVal SET @targetVal = @curSeqVal;
+
+      -- If current sequence value is less than targetVal, advance sequence forward
+      IF @curSeqVal < @targetVal
+      BEGIN
+        DECLARE @restartSql NVARCHAR(200) = N'ALTER SEQUENCE dbo.NetsEcnSequence RESTART WITH ' + CAST((@targetVal + 1) AS NVARCHAR(30)) + N';';
+        EXEC sp_executesql @restartSql;
+      END
+
+      -- Synchronize counter table with targetVal
+      UPDATE dbo.NetsEcnCounter
+      SET CurrentEcn = @targetVal, UpdatedAt = GETDATE()
+      WHERE Id = 1 AND CurrentEcn < @targetVal;
+    `);
 
     // 🔄 Auto-sync kitchens to PrintMaster on every startup
     await syncKitchensToPrintMaster(pool);

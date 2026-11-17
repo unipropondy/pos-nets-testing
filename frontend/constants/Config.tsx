@@ -77,8 +77,15 @@ export const buildFullUrl = (host: string, port?: string, protocol = "http"): st
 };
 
 // Initial API_URL
+// For web clients accessing via public domains or Cloudflare Tunnel (port 80/443 without explicit :3000),
+// automatically use the origin (${window.location.protocol}//${window.location.host}).
+// For local counter POS browser access (localhost, 127.0.0.1, or local router IP), connect to port 3000.
 export let API_URL: string = (Platform.OS === "web" && typeof window !== "undefined")
-  ? `${window.location.protocol}//${window.location.hostname}:3000`
+  ? (window.location.port === "3000"
+      ? `${window.location.protocol}//${window.location.hostname}:3000`
+      : (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+        ? `${window.location.protocol}//${window.location.hostname}:3000`
+        : `${window.location.protocol}//${window.location.host}`)
   : (process.env.EXPO_PUBLIC_API_URL ?? buildFullUrl(currentHost, currentPort, currentProtocol));
 
 console.log(`🌐 [Config] Initial Local Server API: ${API_URL} | Platform: ${Platform.OS}`);

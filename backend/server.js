@@ -433,9 +433,153 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/uploads", express.static(path.join(__dirname, "public/uploads")));
-app.use(express.static(path.join(__dirname, "dist"), { extensions: ["html"] }));
 
-// 🩺 Health check endpoint for frontend warmup ping
+// ============================================================================
+// 🔒 DEDICATED QR DOMAIN SECURITY & VIRTUAL HOST ROUTING
+// ============================================================================
+// When traffic enters via the public QR domain (e.g. qr.smartcafesg.com):
+// 1. Static files are strictly served from backend/dist-qr (Customer Only).
+// 2. HTML navigation is strictly limited to customer paths (/customer, /customer/*).
+// 3. API requests are restricted strictly to customer ordering endpoints.
+// 4. All staff, POS, backoffice, sales, admin, and payment terminal routes are BLOCKED (403 Forbidden).
+// Local POS traffic (localhost, 127.0.0.1, LAN IP) continues to have full, unrestricted access to backend/dist.
+// ============================================================================
+
+// Client-Configurable QR Domain Resolver
+function getQrDomainConfig() {
+  const configured = (process.env.QR_DOMAIN || "https://qr.smartcafesg.com").trim();
+  let normalizedUrl = configured;
+  if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+    normalizedUrl = `https://${normalizedUrl}`;
+  }
+  normalizedUrl = normalizedUrl.replace(/\/+$/, "");
+
+  let hostname = "";
+  try {
+    hostname = new URL(normalizedUrl).hostname.toLowerCase();
+  } catch {
+    hostname = normalizedUrl.replace(/^https?:\/\//i, "").split(/[\/:]/)[0].toLowerCase();
+  }
+
+  return {
+    url: normalizedUrl,
+    hostname: hostname || "qr.smartcafesg.com"
+  };
+}
+
+function isQrDomainRequest(req) {
+  const hostHeader = (req.headers["x-forwarded-host"] || req.headers.host || "").toLowerCase();
+  const hostWithoutPort = hostHeader.split(":")[0].trim();
+  const { hostname } = getQrDomainConfig();
+
+  // Match against configured domain or default qr.smartcafesg.com
+  return hostWithoutPort === hostname || hostWithoutPort === "qr.smartcafesg.com" || hostHeader.includes(hostname);
+}
+
+// Whitelist of exact API path patterns permitted for public customer ordering
+const ALLOWED_QR_API_PREFIXES = [
+  "/api/config/qr-domain",
+  "/api/tables/save-guest",
+  "/api/tables/all",
+  "/api/menu/kitchens",
+  "/api/menu/dishes/all",
+  "/api/menu/dishgroups",
+  "/api/menu/dishes/group",
+  "/api/menu/modifiers",
+  "/api/menu/image",
+  "/api/combo/config",
+  "/api/orders/cart",
+  "/api/orders/save-cart",
+  "/api/orders/remove-item",
+  "/api/orders/send",
+  "/api/orders/checkout",
+  "/api/orders/complete",
+  "/api/order/complete-online-payment",
+  "/api/members/active-promo-image",
+  "/api/members/promocode",
+  "/api/members/deduct-promo",
+  "/api/loyalty/status",
+  "/api/loyalty/customer",
+  "/api/settings",
+  "/api/auth/login",
+  "/api/auth/signup",
+  "/api/logs/client"
+];
+
+// QR Domain Perimeter Enforcement Middleware
+app.use((req, res, next) => {
+  if (!isQrDomainRequest(req)) {
+    return next();
+  }
+
+  const reqPath = req.path;
+
+  // 1. Allow health check and Socket.IO handshake
+  if (reqPath === "/health" || reqPath.startsWith("/socket.io")) {
+    return next();
+  }
+
+  // 2. Handle API requests on QR domain
+  if (reqPath.startsWith("/api/")) {
+    const isAllowedApi = ALLOWED_QR_API_PREFIXES.some(prefix => reqPath === prefix || reqPath.startsWith(prefix + "/"));
+    if (isAllowedApi) {
+      return next();
+    }
+
+    console.warn(`🛑 [QR Perimeter] Blocked unauthorized API access from QR domain: ${req.method} ${req.originalUrl}`);
+    return res.status(403).json({
+      success: false,
+      error: "Access Forbidden: This API endpoint is not accessible from the public QR ordering domain."
+    });
+  }
+
+  // 3. Static Assets for QR Bundle (_expo, assets, favicon.ico, manifest.json)
+  if (reqPath.startsWith("/_expo") || reqPath.startsWith("/assets") || reqPath === "/favicon.ico" || reqPath === "/manifest.json") {
+    const qrDistPath = path.join(__dirname, "dist-qr");
+    return express.static(qrDistPath)(req, res, next);
+  }
+
+  // 4. Customer Page Navigation
+  if (reqPath === "/" || reqPath.startsWith("/customer")) {
+    const qrDistPath = path.join(__dirname, "dist-qr");
+    const customerHtmlPath = path.join(qrDistPath, "customer", "index.html");
+    if (fs.existsSync(customerHtmlPath)) {
+      return res.sendFile(customerHtmlPath);
+    }
+    const rootIndexHtml = path.join(qrDistPath, "index.html");
+    if (fs.existsSync(rootIndexHtml)) {
+      return res.sendFile(rootIndexHtml);
+    }
+  }
+
+  // 5. Block all other staff, POS, admin, or terminal routes on QR domain
+  console.warn(`🛑 [QR Perimeter] Blocked unauthorized frontend route access from QR domain: ${reqPath}`);
+  const notFoundPath = path.join(__dirname, "dist-qr", "404.html");
+  if (fs.existsSync(notFoundPath)) {
+    return res.status(404).sendFile(notFoundPath);
+  }
+  return res.status(403).send("Access Forbidden: Only customer ordering is permitted on this domain.");
+});
+
+// Standard Local POS Static File Serving (Runs for localhost, 127.0.0.1, LAN tablet IPs)
+// Strictly bypassed if request originates from the public QR domain
+app.use((req, res, next) => {
+  if (isQrDomainRequest(req)) {
+    return next();
+  }
+  express.static(path.join(__dirname, "dist"), { extensions: ["html"] })(req, res, next);
+});
+
+// 🌐 Runtime Configuration Endpoint for Customer QR Domain
+app.get("/api/config/qr-domain", (req, res) => {
+  const config = getQrDomainConfig();
+  res.json({
+    success: true,
+    qrDomain: config.url,
+    qrHostname: config.hostname
+  });
+});
+
 // 🩺 Health check endpoint for frontend warmup ping
 app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));
 
@@ -673,6 +817,12 @@ app.use("/api/v1/ai", aiApiLimiter, authenticateAiToken, requireAiAuthorizedRole
 
 // Root Endpoints (Serve static client SPA fallback routing)
 app.get(["/", /^\/customer.*/], (req, res) => {
+  if (isQrDomainRequest(req)) {
+    const qrCustomerHtml = path.join(__dirname, "dist-qr", "customer", "index.html");
+    if (fs.existsSync(qrCustomerHtml)) {
+      return res.sendFile(qrCustomerHtml);
+    }
+  }
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 

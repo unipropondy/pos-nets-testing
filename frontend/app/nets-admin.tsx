@@ -106,12 +106,12 @@ export default function NetsAdminScreen() {
       });
       const data = await res.json();
       if (data.success) {
-        showToast("NETS configuration saved successfully", "success");
+        showToast({ message: "NETS configuration saved successfully", type: "success" });
       } else {
-        showToast(data.error || "Failed to save configuration", "error");
+        showToast({ message: data.error || "Failed to save configuration", type: "error" });
       }
     } catch (err: any) {
-      showToast(err.message, "error");
+      showToast({ message: err.message, type: "error" });
     } finally {
       setLoading(false);
     }
@@ -131,13 +131,13 @@ export default function NetsAdminScreen() {
       fetchLogs();
 
       if (data.success) {
-        showToast(`${actionName}: ${data.description || "Success"}`, "success");
+        showToast({ message: `${actionName}: ${data.description || "Success"}`, type: "success" });
       } else {
-        showToast(`${actionName}: ${data.error || data.description || "Failed"}`, "error");
+        showToast({ message: `${actionName}: ${data.error || data.description || "Failed"}`, type: "error" });
       }
     } catch (err: any) {
       setLastResult({ action: actionName, timestamp: new Date().toLocaleTimeString(), error: err.message });
-      showToast(`${actionName} Error: ${err.message}`, "error");
+      showToast({ message: `${actionName} Error: ${err.message}`, type: "error" });
     } finally {
       setActiveAction(null);
       setLoading(false);
@@ -188,7 +188,7 @@ export default function NetsAdminScreen() {
         {/* Terminal Configuration Card */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
-            <Ionicons name="hardware-chip-outline" size={20} color={Theme.colors.primary} />
+            <Ionicons name="hardware-chip-outline" size={20} color={Theme.primary} />
             <Text style={styles.cardTitle}>Terminal Network Connection</Text>
           </View>
 
@@ -278,7 +278,7 @@ export default function NetsAdminScreen() {
         {/* Administrative Operations Card */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
-            <Ionicons name="construct-outline" size={20} color={Theme.colors.primary} />
+            <Ionicons name="construct-outline" size={20} color={Theme.primary} />
             <Text style={styles.cardTitle}>ECR II Mandatory Functions</Text>
           </View>
 
@@ -448,8 +448,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   fieldToggleBtnActive: {
-    backgroundColor: Theme.colors.primary,
-    borderColor: Theme.colors.primary,
+    backgroundColor: Theme.primary,
+    borderColor: Theme.primary,
   },
   fieldToggleText: {
     color: "#94a3b8",
@@ -468,7 +468,7 @@ const styles = StyleSheet.create({
   },
   ecnLabel: { fontSize: 13, color: "#38bdf8", fontFamily: Fonts.medium },
   saveBtn: {
-    backgroundColor: Theme.colors.primary,
+    backgroundColor: Theme.primary,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
@@ -489,7 +489,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 10,
   },
-  actionBtnActive: { backgroundColor: Theme.colors.primary },
+  actionBtnActive: { backgroundColor: Theme.primary },
   actionBtnText: { color: "#FFF", fontSize: 13, fontFamily: Fonts.medium, marginLeft: 8 },
   eodBtn: {
     backgroundColor: "#d97706",

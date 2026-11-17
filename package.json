@@ -12,9 +12,10 @@
     "react-native-safe-area-context": "~5.6.2"
   },
   "name": "POS-1",
-  "version": "3.0.9",
+  "version": "3.1.0",
   "scripts": {
     "build": "node scripts/build-all.js",
+    "build:qr": "node scripts/build-qr.js",
     "build:web": "npm --prefix frontend run build:web",
     "package-installer": "node scripts/build-all.js && node scripts/pack-installer.js",
     "electron:start": "cd electron && npm start",

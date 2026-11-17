@@ -24,21 +24,12 @@ const QR_API = (data: string, size = 200) =>
   `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}&format=png&margin=10`;
 
 // Resolve the customer-facing base URL for the QR code
-// On web: use current browser's host
-// On native: use the configured API_URL host (same PC)
-function getCustomerBaseUrl(): string {
-  if (Platform.OS === "web" && typeof window !== "undefined") {
-    const { protocol, hostname, port } = window.location;
-    // Expo web runs on :8081 by default
-    return `${protocol}//${hostname}${port ? `:${port}` : ""}`;
+// Uses backend runtime configuration from /api/config/qr-domain with fallback
+function getCustomerBaseUrlFallback(): string {
+  if (process.env.EXPO_PUBLIC_QR_BASE_URL) {
+    return process.env.EXPO_PUBLIC_QR_BASE_URL.replace(/\/$/, "");
   }
-  // For native
-  const apiHost = API_URL.replace(/:\d+$/, ""); // strip port
-  if (apiHost.includes("localhost") || apiHost.includes("192.168")) {
-    return `${apiHost}:8081`;
-  }
-  // Production customer client served directly from backend server
-  return apiHost;
+  return "https://qr.smartcafesg.com";
 }
 
 interface Table {
@@ -62,12 +53,27 @@ export default function QRGeneratorScreen() {
   const [loading, setLoading] = useState(true);
   const [printing, setPrinting] = useState(false);
   const [selectedSection, setSelectedSection] = useState<string>("1");
-  const [baseUrl, setBaseUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState(getCustomerBaseUrlFallback());
 
   useEffect(() => {
-    setBaseUrl(getCustomerBaseUrl());
+    loadRuntimeQrDomain();
     fetchTables();
   }, []);
+
+  const loadRuntimeQrDomain = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/config/qr-domain`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.qrDomain) {
+          setBaseUrl(data.qrDomain.replace(/\/$/, ""));
+          return;
+        }
+      }
+    } catch {
+      // Keep existing baseUrl state fallback if offline
+    }
+  };
 
   const fetchTables = async () => {
     try {
