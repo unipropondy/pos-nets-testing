@@ -499,17 +499,58 @@ class NetsService {
    * - HD / HS: Enhanced ECR Reference Number (configurable, default 'HD')
    */
   async purchase({ amount, ecrRef, isQr = false, retrySameEcn = null, onProgress = null }) {
+    if (isQr) {
+      return this.purchaseQr({ amount, ecrRef, retrySameEcn, onProgress });
+    } else {
+      return this.purchaseCard({ amount, ecrRef, retrySameEcn, onProgress });
+    }
+  }
+
+  /**
+   * Dedicated NETS Card Purchase Flow (FC 30 with T2="01")
+   * Supports: NETS Chip, Tap, Magnetic Stripe, and FlashPay contactless cards.
+   */
+  async purchaseCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    return this._executePurchaseTransaction({
+      amount,
+      ecrRef,
+      txnType: '01',
+      flowName: 'NETS Card',
+      retrySameEcn,
+      onProgress,
+    });
+  }
+
+  /**
+   * Dedicated NETS QR Purchase Flow (FC 30 with T2="04")
+   * Displays NETS Scan to Pay dynamic QR code on the Ingenico terminal display.
+   */
+  async purchaseQr({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    return this._executePurchaseTransaction({
+      amount,
+      ecrRef,
+      txnType: '04',
+      flowName: 'NETS QR',
+      retrySameEcn,
+      onProgress,
+    });
+  }
+
+  /**
+   * Internal common runner for FC 30 with strict flow isolation and validation
+   * @private
+   */
+  async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
     if (this.isProcessing) {
-      throw new Error('A payment transaction is already in progress on the terminal.');
+      throw new Error(`A payment transaction is already in progress on the terminal.`);
     }
 
     this.isProcessing = true;
     const ecn = retrySameEcn || await this.getNextEcnAsync();
     const amountStr = formatAmount(amount);
     const cashbackStr = '000000000000';
-    const txnType = isQr ? '04' : '01';
     const refNum = (ecrRef || `ECR${Date.now()}`).toString().slice(0, 20);
-    const refCode = (this.config.ecrRefFieldCode || 'HD').toUpperCase().slice(0, 2);
+    const refCode = (this.config.ecrRefFieldCode || 'HS').toUpperCase().slice(0, 2);
 
     const fields = [
       { code: 'T2', value: txnType },
@@ -525,7 +566,7 @@ class NetsService {
       fields,
     });
 
-    console.log(`[NetsService] Initiating FC 30 Purchase: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
+    console.log(`[NetsService] [${flowName}] Initiating FC 30: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
 
     try {
       const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress);
@@ -535,6 +576,8 @@ class NetsService {
       const result = {
         ecn,
         isApproved,
+        paymentType: flowName, // 'NETS Card' or 'NETS QR'
+        txnType,
         approvalReason: res.parsed.approvalReason,
         responseCode: res.parsed.responseCode,
         hostResponseCode: res.parsed.hostResponseCode,
@@ -558,7 +601,7 @@ class NetsService {
       return result;
     } catch (err) {
       this.isProcessing = false;
-      console.error(`[NetsService] Purchase error ECN=${ecn}:`, err.message);
+      console.error(`[NetsService] [${flowName}] Purchase error ECN=${ecn}:`, err.message);
 
       // Handle NAK (Terminal Busy)
       // Section 2.2.2.2: Do NOT retry financial payments blindly! Terminal is busy with another customer.
@@ -572,7 +615,7 @@ class NetsService {
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
       if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        console.warn(`[NetsService] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
+        console.warn(`[NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
         try {
           const inquiry = await this.getLastApprovedTransaction();
 
@@ -587,15 +630,17 @@ class NetsService {
 
           // Check 3: Strict Approval verification
           if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
-            console.log(`[NetsService] Transaction conclusively matched & recovered via FC 56! Approved.`);
+            console.log(`[NetsService] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
             const recoveredResult = {
               ecn,
               isApproved: true,
               recovered: true,
-              approvalReason: 'Approved (Conclusively matched & recovered via FC 56)',
+              paymentType: flowName,
+              txnType,
+              approvalReason: `Approved (Conclusively matched & recovered via FC 56 for ${flowName})`,
               responseCode: inquiry.responseCode,
               hostResponseCode: inquiry.parsed.hostResponseCode,
-              responseDescription: 'Approved (Recovered via FC 56 Inquiry)',
+              responseDescription: `Approved (Recovered via FC 56 Inquiry for ${flowName})`,
               approvalCode: inquiry.approvalCode,
               stan: inquiry.fields['65'] || '',
               rrn: inquiry.fields['D3'] || '',
@@ -613,14 +658,14 @@ class NetsService {
             this.lastTransaction = recoveredResult;
             return recoveredResult;
           } else {
-            console.warn(`[NetsService] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
-            const unconfirmedErr = new Error('Transaction outcome uncertain. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.');
+            console.warn(`[NetsService] [${flowName}] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
+            const unconfirmedErr = new Error(`Transaction outcome uncertain for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
             unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
             unconfirmedErr.inquiry = inquiry;
             throw unconfirmedErr;
           }
         } catch (inqErr) {
-          console.error(`[NetsService] FC 56 recovery failed:`, inqErr.message);
+          console.error(`[NetsService] [${flowName}] FC 56 recovery failed:`, inqErr.message);
           throw inqErr;
         }
       }

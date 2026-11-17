@@ -614,11 +614,16 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
     );
 
     // ==========================================
-    // 💳 NETS / NETS QR SPLIT PAYMENT FLOW
+    // 💳 NETS CARD / NETS QR SPLIT PAYMENT FLOW (SEPARATE ENDPOINTS)
     // ==========================================
     if (isNetsTerminal(row.payMode)) {
       const isQr = isNetsQrMode(row.payMode);
-      console.log('🔄 [SplitPayment] Calling NETS terminal for:', row.payMode, 'isQr:', isQr, 'amount:', amt);
+      const endpoint = isQr ? '/api/nets/qr-payment' : '/api/nets/card-payment';
+      const promptMsg = isQr
+        ? "Presenting QR on NETS terminal..."
+        : "Please tap/insert card on NETS terminal...";
+
+      console.log(`🔄 [SplitPayment] Calling NETS endpoint: ${endpoint} for: ${row.payMode} (isQr: ${isQr}, amount: ${amt})`);
 
       const context = useOrderContextStore.getState().currentOrder;
       const tableId = context?.tableId?.toString();
@@ -628,12 +633,12 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
           splitRowId: row.id,
           amount: amt,
           payMode: row.payMode,
-          message: isQr ? "Presenting QR on NETS terminal..." : "Please tap/insert card on NETS terminal...",
+          message: promptMsg,
         };
         useTerminalPaymentStore.getState().setSession(tableId, {
           tableId,
           status: "processing",
-          message: isQr ? "Presenting QR on NETS terminal..." : "Please tap/insert card on NETS terminal...",
+          message: promptMsg,
           method: row.payMode,
           total: amt,
           splitRowId: row.id,
@@ -641,7 +646,7 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
         });
       }
 
-      const netsResponse = await fetch(`${API_URL}/api/nets/payment`, {
+      const netsResponse = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -656,7 +661,7 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
       });
 
       const netsResult = await netsResponse.json();
-      console.log('✅ [SplitPayment] NETS Terminal response:', netsResult);
+      console.log(`✅ [SplitPayment] NETS ${isQr ? 'QR' : 'Card'} response:`, netsResult);
 
       if (netsResult.success && netsResult.approved) {
         if (tableId && ongoingSplitSessions[tableId]) {

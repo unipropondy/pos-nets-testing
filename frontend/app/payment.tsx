@@ -113,7 +113,9 @@ type PaymentMethod = {
 const PAYMODE_ICON_MAP: Record<string, string> = {
   CAS: "money-bill-wave",
   CASH: "money-bill-wave",
-  NETS: "exchange-alt",
+  NETS: "credit-card",
+  NETSCARD: "credit-card",
+  NETSQR: "qrcode",
   AMEX: "cc-amex",
   MASTER: "cc-mastercard",
   VISA: "cc-visa",
@@ -1570,18 +1572,23 @@ export default function PaymentScreen() {
     const isNets           = isNetsQrMode || isNetsCardMode;
 
     // ==========================================
-    // 💳 NETS ECR II DIRECT TERMINAL CALL
+    // 💳 NETS ECR II DIRECT TERMINAL CALL (SEPARATE FLOWS)
     // ==========================================
     if (isNets && total > 0 && cacheKey) {
+      const endpoint = isNetsQrMode ? '/api/nets/qr-payment' : '/api/nets/card-payment';
+      const promptMsg = isNetsQrMode
+        ? "Presenting QR code on NETS terminal..."
+        : "Please tap, insert NETS card or FlashPay on terminal...";
+
       setPaymentStatus("processing");
-      setPaymentMessage(isNetsQrMode ? "Presenting QR on NETS terminal..." : "Please tap/insert card on NETS terminal...");
+      setPaymentMessage(promptMsg);
       setProcessing(true);
 
-      console.log('🔄 [MainPayment] Calling NETS terminal for:', method, 'isQr:', isNetsQrMode, 'Amount:', total);
+      console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (isQr: ${isNetsQrMode}, Amount: ${total})`);
 
       const fetchPromise = (async () => {
         try {
-          const response = await fetch(`${API_URL}/api/nets/payment`, {
+          const response = await fetch(`${API_URL}${endpoint}`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -1596,7 +1603,7 @@ export default function PaymentScreen() {
           });
 
           const result = await response.json();
-          console.log('✅ [MainPayment] NETS Terminal response:', result);
+          console.log(`✅ [MainPayment] NETS ${isNetsQrMode ? 'QR' : 'Card'} response:`, result);
 
           let status: "success" | "cancelled" | "failed" = "failed";
           let message = "";
@@ -1606,13 +1613,13 @@ export default function PaymentScreen() {
             message = `✅ ${currencySymbol}${total.toFixed(2)} paid successfully via ${method} (Approval: ${result.approvalCode || result.stan})`;
           } else if (result.responseCode === 'XX') {
             status = "cancelled";
-            message = `❌ Transaction cancelled on NETS terminal`;
+            message = `❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction cancelled on terminal`;
           } else if (result.responseCode === 'TO') {
             status = "failed";
-            message = `⏰ NETS terminal transaction timeout`;
+            message = `⏰ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction timeout`;
           } else {
             status = "failed";
-            message = `❌ ${result.error || result.responseDescription || 'NETS payment declined'}`;
+            message = `❌ ${result.error || result.responseDescription || (isNetsQrMode ? 'NETS QR payment declined' : 'NETS Card payment declined')}`;
           }
 
           if (ongoingPayments[cacheKey]) {
@@ -1628,7 +1635,7 @@ export default function PaymentScreen() {
             handleTerminalPaymentSuccess(method, total, message);
           } else if (status === "cancelled") {
             setPaymentMessage(message);
-            Alert.alert('❌ Transaction Cancelled', 'Payment was cancelled on the NETS terminal. Please try again.');
+            Alert.alert('❌ Transaction Cancelled', `${isNetsQrMode ? 'QR' : 'Card'} payment was cancelled on the NETS terminal. Please try again.`);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
             }
@@ -1637,7 +1644,7 @@ export default function PaymentScreen() {
             setProcessing(false);
             setPaymentStatus("failed");
             setPaymentMessage(message);
-            Alert.alert('❌ Payment Failed', message);
+            Alert.alert(`❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Failed`, message);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
             }
@@ -1645,7 +1652,7 @@ export default function PaymentScreen() {
           }
           return result;
         } catch (error: any) {
-          console.error('❌ [MainPayment] NETS error:', error);
+          console.error(`❌ [MainPayment] NETS ${isNetsQrMode ? 'QR' : 'Card'} error:`, error);
           const status = "failed";
           const message = `❌ ${error.message}`;
 
@@ -1660,7 +1667,7 @@ export default function PaymentScreen() {
           setProcessing(false);
           setPaymentStatus("failed");
           setPaymentMessage(message);
-          Alert.alert('❌ Payment Failed', message);
+          Alert.alert(`❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Failed`, message);
           delete ongoingPayments[cacheKey];
           return { success: false, error: error.message };
         }
@@ -1668,7 +1675,7 @@ export default function PaymentScreen() {
 
       ongoingPayments[cacheKey] = {
         status: "processing",
-        message: isNetsQrMode ? "Presenting QR on NETS terminal..." : "Please tap/insert card on NETS terminal...",
+        message: promptMsg,
         method: method,
         total: total,
         promise: fetchPromise,
@@ -2084,15 +2091,16 @@ export default function PaymentScreen() {
               referenceNo: ""
             });
           }
-          // YeahPay: terminal was already called directly, mark as pre-processed
+          // Terminal integrations: payment was already called directly, mark as pre-processed
           const _mNorm = method.trim().toUpperCase();
           const _isYeahPayFinal = _mNorm === "YEAHPAY PAYNOW" || _mNorm === "YEAHPAY CARD";
+          const _isNetsFinal = _mNorm === "NETS" || _mNorm === "NETS CARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR";
           finalPayments.push({
             payModeId,
             payMode: method,
             amount: total,
             referenceNo: "",
-            isTerminalAlreadyProcessed: _isYeahPayFinal,
+            isTerminalAlreadyProcessed: _isYeahPayFinal || _isNetsFinal,
           });
           finalTotalAmount = total + totalFocAmount;
         }

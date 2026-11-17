@@ -484,6 +484,105 @@ async function runTests() {
       }
     });
 
+    // ----------------------------------------------------
+    // Scenario 13: Dedicated NETS Card Purchase Flow (T2="01")
+    // ----------------------------------------------------
+    await test('Dedicated purchaseCard executes FC 30 with T2="01" for NETS & FlashPay', async () => {
+      let sentFrame = null;
+      mockServer.setHandler((socket, buffer, clearBuf) => {
+        sentFrame = buffer;
+        const resFrame = buildNetsFrame({
+          ecn: '000000009613',
+          functionCode: '30',
+          responseCode: '00',
+          fields: [
+            { code: '01', value: 'CARD_OK' },
+            { code: 'HC', value: '00' },
+            { code: 'HS', value: 'POS_CARD_TEST' },
+            { code: '40', value: '000000001500' },
+            { code: 'L7', value: 'FLASHPAY' },
+          ]
+        });
+        socket.write(resFrame);
+        clearBuf();
+      });
+
+      const res = await netsService.purchaseCard({
+        amount: 15.0,
+        ecrRef: 'POS_CARD_TEST'
+      });
+
+      assert(sentFrame !== null);
+      const parsedSent = parseNetsFrame(sentFrame);
+      assert.strictEqual(parsedSent.fields['T2'], '01', 'Card transaction type must be 01');
+      assert.strictEqual(res.isApproved, true);
+      assert.strictEqual(res.paymentType, 'NETS Card');
+      assert.strictEqual(res.cardLabel, 'FLASHPAY');
+    });
+
+    // ----------------------------------------------------
+    // Scenario 14: Dedicated NETS QR Purchase Flow (T2="04")
+    // ----------------------------------------------------
+    await test('Dedicated purchaseQr executes FC 30 with T2="04" for Terminal QR Scan', async () => {
+      let sentFrame = null;
+      mockServer.setHandler((socket, buffer, clearBuf) => {
+        sentFrame = buffer;
+        const resFrame = buildNetsFrame({
+          ecn: '000000009614',
+          functionCode: '30',
+          responseCode: '00',
+          fields: [
+            { code: '01', value: 'QR_OK' },
+            { code: 'HC', value: '00' },
+            { code: 'HS', value: 'POS_QR_TEST' },
+            { code: '40', value: '000000002000' },
+          ]
+        });
+        socket.write(resFrame);
+        clearBuf();
+      });
+
+      const res = await netsService.purchaseQr({
+        amount: 20.0,
+        ecrRef: 'POS_QR_TEST'
+      });
+
+      assert(sentFrame !== null);
+      const parsedSent = parseNetsFrame(sentFrame);
+      assert.strictEqual(parsedSent.fields['T2'], '04', 'QR transaction type must be 04');
+      assert.strictEqual(res.isApproved, true);
+      assert.strictEqual(res.paymentType, 'NETS QR');
+    });
+
+    // ----------------------------------------------------
+    // Scenario 15: QR Payment Declined Flow
+    // ----------------------------------------------------
+    await test('NETS QR Payment Declined Flow properly reports failure without switching', async () => {
+      mockServer.setHandler((socket, buffer, clearBuf) => {
+        const resFrame = buildNetsFrame({
+          ecn: '000000009615',
+          functionCode: '30',
+          responseCode: '91', // No reply from bank / QR timeout
+          fields: [
+            { code: 'HS', value: 'POS_QR_DECLINED' },
+            { code: '40', value: '000000000500' },
+            { code: 'HC', value: '91' },
+          ]
+        });
+        socket.write(resFrame);
+        clearBuf();
+      });
+
+      const res = await netsService.purchaseQr({
+        amount: 5.0,
+        ecrRef: 'POS_QR_DECLINED'
+      });
+
+      assert.strictEqual(res.isApproved, false);
+      assert.strictEqual(res.paymentType, 'NETS QR');
+      assert.strictEqual(res.responseCode, '91');
+    });
+
   } finally {
     await mockServer.stop();
     netsService.config.terminalIp = origIp;

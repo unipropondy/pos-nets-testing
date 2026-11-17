@@ -244,20 +244,17 @@ router.post('/end-of-day', async (req, res) => {
 });
 
 /**
- * POST /api/nets/payment
- * Initiate NETS Purchase (T2="01") or NETS QR (T2="04")
- * Body: { amount, ecrRef, isQr, tableId }
+ * Helper to process and broadcast payment transactions cleanly
  */
-router.post('/payment', async (req, res) => {
-  const { amount, ecrRef, isQr = false, tableId = null } = req.body;
+async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName }) {
+  const { amount, ecrRef, tableId = null } = req.body;
   const io = req.app.get('socketio');
 
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
     return res.status(400).json({ success: false, error: 'Valid amount is required.' });
   }
 
-  const txnTitle = isQr ? 'NETS QR Purchase (FC 30 T2=04)' : 'NETS Card Purchase (FC 30 T2=01)';
-  logComm('TX', txnTitle, { amount, ecrRef, isQr, tableId });
+  logComm('TX', title, { amount, ecrRef, isQr, tableId });
 
   // Broadcast initial terminal payment status
   if (io) {
@@ -265,7 +262,7 @@ router.post('/payment', async (req, res) => {
       tableId,
       status: 'WAITING_CARD',
       message: isQr ? 'Presenting QR code on terminal...' : 'Please tap, insert card or present mobile device on NETS terminal...',
-      paymentMethod: isQr ? 'NETS QR' : 'NETS',
+      paymentMethod: paymentMethodName,
       amount: parseFloat(amount),
       ecrRef,
     });
@@ -278,29 +275,26 @@ router.post('/payment', async (req, res) => {
           tableId,
           status: 'PROCESSING',
           message: prog.message,
-          paymentMethod: isQr ? 'NETS QR' : 'NETS',
+          paymentMethod: paymentMethodName,
           amount: parseFloat(amount),
           ecrRef,
         });
       }
     };
 
-    const result = await netsService.purchase({
-      amount: parseFloat(amount),
-      ecrRef,
-      isQr: Boolean(isQr),
-      onProgress,
-    });
+    const result = isQr
+      ? await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, onProgress })
+      : await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, onProgress });
 
-    logComm('RX', `${txnTitle} Result`, result);
+    logComm('RX', `${title} Result`, result);
 
     if (result.isApproved) {
       if (io) {
         io.emit('terminal_payment_sync', {
           tableId,
           status: 'APPROVED',
-          message: 'Payment Approved by NETS!',
-          paymentMethod: isQr ? 'NETS QR' : 'NETS',
+          message: `${paymentMethodName} Payment Approved by NETS!`,
+          paymentMethod: paymentMethodName,
           amount: parseFloat(amount),
           approvalCode: result.approvalCode,
           stan: result.stan,
@@ -312,6 +306,7 @@ router.post('/payment', async (req, res) => {
       return res.json({
         success: true,
         approved: true,
+        paymentMethod: paymentMethodName,
         ...result,
         rawHex: sanitizeRawHex(result.rawHex),
       });
@@ -320,8 +315,8 @@ router.post('/payment', async (req, res) => {
         io.emit('terminal_payment_sync', {
           tableId,
           status: 'FAILED',
-          message: result.approvalReason || result.responseDescription || 'Payment declined by terminal.',
-          paymentMethod: isQr ? 'NETS QR' : 'NETS',
+          message: result.approvalReason || result.responseDescription || `${paymentMethodName} declined by terminal.`,
+          paymentMethod: paymentMethodName,
           amount: parseFloat(amount),
           responseCode: result.responseCode,
           hostResponseCode: result.hostResponseCode,
@@ -330,29 +325,70 @@ router.post('/payment', async (req, res) => {
       return res.status(400).json({
         success: false,
         approved: false,
-        error: result.approvalReason || result.responseDescription || `Payment declined (${result.responseCode})`,
+        paymentMethod: paymentMethodName,
+        error: result.approvalReason || result.responseDescription || `${paymentMethodName} declined (${result.responseCode})`,
         ...result,
         rawHex: sanitizeRawHex(result.rawHex),
       });
     }
   } catch (err) {
-    logComm('ERR', `${txnTitle} Failure`, { error: err.message, code: err.code });
+    logComm('ERR', `${title} Failure`, { error: err.message, code: err.code });
     if (io) {
       io.emit('terminal_payment_sync', {
         tableId,
         status: 'FAILED',
         message: err.message,
-        paymentMethod: isQr ? 'NETS QR' : 'NETS',
+        paymentMethod: paymentMethodName,
         amount: parseFloat(amount),
       });
     }
     return res.status(500).json({
       success: false,
       approved: false,
+      paymentMethod: paymentMethodName,
       error: err.message,
       errorCode: err.code || 'EUNKNOWN',
     });
   }
+}
+
+/**
+ * POST /api/nets/card-payment
+ * Dedicated endpoint for NETS Card Payment (FC 30 T2=01)
+ * Supports NETS Debit, Contactless, FlashPay, and chip/pin.
+ */
+router.post('/card-payment', async (req, res) => {
+  return handlePaymentExecution(req, res, {
+    isQr: false,
+    title: 'NETS Card Purchase (FC 30 T2=01)',
+    paymentMethodName: 'NETS'
+  });
+});
+
+/**
+ * POST /api/nets/qr-payment
+ * Dedicated endpoint for NETS Terminal QR Payment (FC 30 T2=04)
+ * Displays dynamic NETS QR code on the terminal screen.
+ */
+router.post('/qr-payment', async (req, res) => {
+  return handlePaymentExecution(req, res, {
+    isQr: true,
+    title: 'NETS QR Purchase (FC 30 T2=04)',
+    paymentMethodName: 'NETS QR'
+  });
+});
+
+/**
+ * POST /api/nets/payment
+ * Compatibility router: Dispatches cleanly based on `isQr` flag
+ */
+router.post('/payment', async (req, res) => {
+  const isQr = Boolean(req.body && req.body.isQr);
+  return handlePaymentExecution(req, res, {
+    isQr,
+    title: isQr ? 'NETS QR Purchase (FC 30 T2=04)' : 'NETS Card Purchase (FC 30 T2=01)',
+    paymentMethodName: isQr ? 'NETS QR' : 'NETS'
+  });
 });
 
 /**
@@ -383,10 +419,10 @@ router.post('/qr-request', async (req, res) => {
 });
 
 /**
- * POST /api/nets/qr-payment
- * FC Q2: Complete QR Payment after display
+ * POST /api/nets/pos-qr-payment
+ * FC Q2: Complete Dynamic QR Payment displayed on POS screen
  */
-router.post('/qr-payment', async (req, res) => {
+router.post('/pos-qr-payment', async (req, res) => {
   const { amount, qrPayload, ecrRef } = req.body;
   try {
     logComm('TX', 'FC Q2 - QR Payment Confirmation', { amount, ecrRef });
