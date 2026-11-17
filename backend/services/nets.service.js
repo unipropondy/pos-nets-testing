@@ -42,7 +42,7 @@ class NetsService {
       connectionTimeoutMs: 10000,  // 10s TCP connect timeout
       merchantId: '',
       terminalId: '',
-      ecrRefFieldCode: 'HD',       // Default to 'HD' as per spec; configurable to 'HS' if cert requires
+      ecrRefFieldCode: 'HS',       // Mandatory 'HS' per DBS UAT requirement (configurable to 'HD')
       autoRetryWithSameEcn: true,
       lastApprovedQueryOnTimeout: true,
     };
@@ -188,10 +188,13 @@ class NetsService {
       let responseBuffer = Buffer.alloc(0);
       let expectedTotalLength = null;
       let timer = null;
+      let connectTimer = null;
       let isResolved = false;
+      let requestDispatched = false;
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
+        if (connectTimer) clearTimeout(connectTimer);
         socket.removeAllListeners();
         socket.destroy();
       };
@@ -204,7 +207,9 @@ class NetsService {
           const parsed = parseNetsFrame(buf);
           resolve({ parsed, rawHex: buf.toString('hex') });
         } catch (err) {
-          reject(new Error(`Failed to parse terminal response: ${err.message}`));
+          err.isUncertain = requestDispatched;
+          err.requestDispatched = requestDispatched;
+          reject(err);
         }
       };
 
@@ -212,29 +217,57 @@ class NetsService {
         if (isResolved) return;
         isResolved = true;
         cleanup();
+        err.requestDispatched = requestDispatched;
         reject(err);
       };
 
+      // Connect timeout
+      connectTimer = setTimeout(() => {
+        const connErr = new Error(`Connection to NETS terminal at ${terminalIp}:${terminalPort} timed out after ${connectionTimeoutMs / 1000}s`);
+        connErr.code = 'ETIMEDOUT';
+        connErr.isConnectTimeout = true;
+        connErr.requestDispatched = false;
+        finishError(connErr);
+      }, connectionTimeoutMs);
+
+      // Total transaction timeout
       timer = setTimeout(() => {
         const timeoutErr = new Error(`Terminal communication timed out after ${timeoutMs / 1000} seconds`);
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
+        timeoutErr.requestDispatched = requestDispatched;
         finishError(timeoutErr);
       }, timeoutMs);
 
-      socket.setTimeout(connectionTimeoutMs);
-
       socket.connect(terminalPort, terminalIp, () => {
-        socket.setTimeout(0);
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+          connectTimer = null;
+        }
+
+        // Keep socket timeout active for stalled responses instead of clearing it to 0
+        socket.setTimeout(timeoutMs);
+
         if (onProgress) onProgress({ status: 'connected', message: `Connected to NETS terminal at ${terminalIp}:${terminalPort}` });
 
         socket.write(frameBuffer, (err) => {
           if (err) {
-            finishError(new Error(`Failed to send data to terminal: ${err.message}`));
+            const writeErr = new Error(`Failed to send data to terminal: ${err.message}`);
+            writeErr.requestDispatched = false;
+            finishError(writeErr);
           } else {
+            requestDispatched = true;
             if (onProgress) onProgress({ status: 'sent', message: 'Frame dispatched to terminal, awaiting response' });
           }
         });
+      });
+
+      socket.on('timeout', () => {
+        const timeoutErr = new Error(`NETS Terminal socket idle timed out after ${timeoutMs / 1000} seconds`);
+        timeoutErr.code = 'ETIMEDOUT';
+        timeoutErr.isTimeout = true;
+        timeoutErr.requestDispatched = requestDispatched;
+        finishError(timeoutErr);
       });
 
       socket.on('data', (chunk) => {
@@ -246,6 +279,7 @@ class NetsService {
           const nakErr = new Error('Terminal Busy (NAK 0x15 received from terminal)');
           nakErr.code = 'ETERMINALBUSY';
           nakErr.isNak = true;
+          nakErr.requestDispatched = false;
           return finishError(nakErr);
         }
 
@@ -268,15 +302,26 @@ class NetsService {
       });
 
       socket.on('error', (err) => {
-        finishError(new Error(`NETS Terminal socket error: ${err.message}`));
+        const sockErr = new Error(`NETS Terminal socket error: ${err.message}`);
+        sockErr.code = err.code || 'ESOCKET';
+        sockErr.requestDispatched = requestDispatched;
+        finishError(sockErr);
       });
 
       socket.on('close', () => {
         if (!isResolved) {
-          if (responseBuffer.length >= 21) {
-            finishSuccess(responseBuffer);
+          if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
+            finishSuccess(responseBuffer.slice(0, expectedTotalLength));
           } else {
-            finishError(new Error('Connection closed by terminal before complete response was received'));
+            const closeErr = new Error(
+              requestDispatched
+                ? `Connection closed prematurely by NETS terminal after request dispatched (${responseBuffer.length} bytes received)`
+                : 'Connection closed by terminal before request dispatched'
+            );
+            closeErr.code = 'EUNCERTAIN_SOCKET_CLOSED';
+            closeErr.isPrematureClose = true;
+            closeErr.requestDispatched = requestDispatched;
+            finishError(closeErr);
           }
         }
       });
@@ -522,14 +567,18 @@ class NetsService {
       }
 
       // Handle Timeout / Uncertain outcome: Rigorous FC 56 Recovery
-      if (err.isTimeout && this.config.lastApprovedQueryOnTimeout) {
-        console.warn(`[NetsService] Timeout on ECN=${ecn}. Querying FC 56 to check if approved.`);
+      // Trigger recovery whenever the request was dispatched and outcome became uncertain
+      // (e.g. response timeout, socket reset/close, or parsing failure)
+      const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
+
+      if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
+        console.warn(`[NetsService] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
         try {
           const inquiry = await this.getLastApprovedTransaction();
 
           // RIGOROUS RECONCILIATION MATCHING:
           // Check 1: ECR Reference Number match (HD or HS)
-          const inqRef = inquiry.fields['HD'] || inquiry.fields['HS'] || '';
+          const inqRef = inquiry.fields['HS'] || inquiry.fields['HD'] || '';
           const isRefMatched = inqRef.trim() === refNum.trim();
 
           // Check 2: Transaction Amount match
@@ -567,6 +616,7 @@ class NetsService {
             console.warn(`[NetsService] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
             const unconfirmedErr = new Error('Transaction outcome uncertain. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.');
             unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
+            unconfirmedErr.inquiry = inquiry;
             throw unconfirmedErr;
           }
         } catch (inqErr) {

@@ -6,7 +6,7 @@
   "connectionTimeoutMs": 10000,
   "merchantId": "",
   "terminalId": "",
-  "ecrRefFieldCode": "HD",
+  "ecrRefFieldCode": "HS",
   "autoRetryWithSameEcn": true,
   "lastApprovedQueryOnTimeout": true
 }

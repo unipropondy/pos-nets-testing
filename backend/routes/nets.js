@@ -404,4 +404,105 @@ router.post('/qr-payment', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/nets/reconcile-approved-transaction
+ * Safe Reconciliation for Approved Transactions that got stuck in processing/failed state.
+ * Validates against terminal via FC 56 without recharging the card or re-issuing FC 30.
+ * Body: { ecrRef, amount, orderId, tableId, approvalCode }
+ */
+router.post('/reconcile-approved-transaction', async (req, res) => {
+  const { ecrRef, amount, orderId, tableId, approvalCode: clientApprovalCode } = req.body;
+  const io = req.app.get('socketio');
+
+  if (!ecrRef || !amount) {
+    return res.status(400).json({ success: false, error: 'ecrRef and amount are required for reconciliation.' });
+  }
+
+  const amountNum = parseFloat(amount);
+  const amountStr = String(Math.round(amountNum * 100)).padStart(12, '0');
+
+  try {
+    logComm('TX', 'Reconciliation Query (FC 56)', { ecrRef, amount, orderId, tableId });
+    const inquiry = await netsService.getLastApprovedTransaction();
+    logComm('RX', 'Reconciliation Response (FC 56)', inquiry);
+
+    const inqRef = (inquiry.fields['HS'] || inquiry.fields['HD'] || '').trim();
+    const expectedRef = ecrRef.trim();
+    const inqAmt = (inquiry.fields['40'] || '').trim();
+    const inqApproval = (inquiry.approvalCode || inquiry.fields['01'] || '').trim();
+
+    const isRefMatched = inqRef === expectedRef;
+    const isAmtMatched = inqAmt === amountStr;
+    const isApprovalMatched = !clientApprovalCode || (inqApproval === clientApprovalCode.trim());
+
+    if (inquiry.success && isRefMatched && isAmtMatched && inquiry.parsed.isApproved && isApprovalMatched) {
+      const reconciledResult = {
+        success: true,
+        reconciled: true,
+        approved: true,
+        isApproved: true,
+        ecrRef: expectedRef,
+        amount: amountNum,
+        approvalCode: inqApproval,
+        stan: inquiry.fields['65'] || '',
+        rrn: inquiry.fields['D3'] || '',
+        merchantId: inquiry.fields['D1'] || '',
+        terminalId: inquiry.fields['16'] || '',
+        cardLabel: inquiry.fields['L7'] || '',
+        receiptData: inquiry.fields['RP'] || '',
+        date: inquiry.fields['03'] || '',
+        time: inquiry.fields['04'] || '',
+        fields: inquiry.fields,
+        rawHex: sanitizeRawHex(inquiry.rawHex),
+      };
+
+      if (io) {
+        io.emit('terminal_payment_sync', {
+          tableId,
+          orderId,
+          status: 'APPROVED',
+          message: 'Payment Reconciled and Approved by NETS!',
+          paymentMethod: 'NETS',
+          amount: amountNum,
+          approvalCode: reconciledResult.approvalCode,
+          stan: reconciledResult.stan,
+          rrn: reconciledResult.rrn,
+          ecrRef: reconciledResult.ecrRef,
+          receiptData: reconciledResult.receiptData,
+        });
+      }
+
+      return res.json(reconciledResult);
+    } else {
+      const reason = !inquiry.success
+        ? `FC 56 terminal inquiry failed: ${inquiry.description}`
+        : !isRefMatched
+        ? `ECR reference mismatch (Terminal: '${inqRef}', POS: '${expectedRef}')`
+        : !isAmtMatched
+        ? `Amount mismatch (Terminal: '${inqAmt}', POS: '${amountStr}')`
+        : 'Terminal last transaction was not approved';
+
+      logComm('ERR', 'Reconciliation Mismatch', { reason, inqRef, expectedRef, inqAmt, amountStr });
+      return res.status(409).json({
+        success: false,
+        reconciled: false,
+        error: `Reconciliation failed: ${reason}. Please inspect terminal receipt. Do NOT recharge customer.`,
+        inquirySummary: {
+          terminalRef: inqRef,
+          terminalAmount: inqAmt,
+          terminalApproval: inqApproval,
+          terminalStatus: inquiry.description
+        }
+      });
+    }
+  } catch (err) {
+    logComm('ERR', 'Reconciliation Exception', { error: err.message });
+    return res.status(500).json({
+      success: false,
+      reconciled: false,
+      error: `Reconciliation exception: ${err.message}`
+    });
+  }
+});
+
 module.exports = router;

@@ -97,15 +97,19 @@ function formatAmount(amount) {
  * @param {Array<{code: string, value: string|Buffer}>} [params.fields=[]] - Message fields
  * @returns {Buffer} Complete wire frame [2-byte BCD Length][Message Body][1-byte LRC]
  */
-function buildNetsFrame({ ecn, functionCode, versionCode = '01', fields = [] }) {
+function buildNetsFrame({ ecn, functionCode, versionCode = '01', responseCode = null, fields = [] }) {
   // Normalize ECN to 12 digits
   const ecnStr = (ecn || '1').toString().padStart(12, '0').slice(-12);
   const fnCode = (functionCode || '55').toString().padStart(2, '0').slice(-2);
-  const verCode = (versionCode || '01').toString().padStart(2, '0').slice(-2);
+  // In request frames, bytes 14-16 are Version Code (e.g. '01').
+  // In terminal response frames, bytes 14-16 are Terminal Response Code (e.g. '00', '51').
+  const code14_16 = (responseCode !== null && responseCode !== undefined)
+    ? responseCode.toString().padStart(2, '0').slice(-2)
+    : (versionCode || '01').toString().padStart(2, '0').slice(-2);
   const rfu = '0'; // 1 byte RFU
 
   // 1. Build Header Buffer (18 bytes total)
-  const headerStr = `${ecnStr}${fnCode}${verCode}${rfu}`;
+  const headerStr = `${ecnStr}${fnCode}${code14_16}${rfu}`;
   const headerBuf = Buffer.concat([
     Buffer.from(headerStr, 'ascii'),
     Buffer.from([FS]),
@@ -219,7 +223,9 @@ function validateApprovalStatus(functionCode, responseCode, fields = {}) {
  * @param {Buffer} buffer - Wire frame received from TCP socket
  * @returns {Object} Parsed response object
  */
-function parseNetsFrame(buffer) {
+function parseNetsFrame(buffer, options = {}) {
+  const { strictLrc = true, strictLength = true } = options;
+
   if (!buffer || buffer.length < 21) {
     throw new Error(`Buffer too short to be a valid NETS frame (${buffer ? buffer.length : 0} bytes)`);
   }
@@ -228,21 +234,37 @@ function parseNetsFrame(buffer) {
   const expectedBodyAndLrcLen = fromBcd2(buffer, 0);
   const actualBodyAndLrcLen = buffer.length - 2;
 
+  if (strictLength && expectedBodyAndLrcLen !== actualBodyAndLrcLen) {
+    throw new Error(`Invalid NETS frame length: BCD header specified ${expectedBodyAndLrcLen} bytes, but received ${actualBodyAndLrcLen} bytes`);
+  }
+
   // 2. Extract Message Body and Received LRC
   // LRC is the last byte
   const receivedLrc = buffer[buffer.length - 1];
   const messageBody = buffer.slice(2, buffer.length - 1);
 
-  // 3. Validate LRC
+  // 3. Validate LRC Checksum
   const computedLrc = calculateLrc(messageBody);
   const isLrcValid = receivedLrc === computedLrc;
 
-  // 4. Parse Header (18 bytes)
+  if (strictLrc && !isLrcValid) {
+    throw new Error(`Invalid NETS frame LRC checksum: expected 0x${computedLrc.toString(16).padStart(2, '0')}, received 0x${receivedLrc.toString(16).padStart(2, '0')}`);
+  }
+
+  // 4. Parse Header (18 bytes total)
+  if (messageBody.length < 18) {
+    throw new Error(`Message body too short for NETS header (expected >= 18 bytes, got ${messageBody.length})`);
+  }
   const headerBuf = messageBody.slice(0, 18);
   const ecn = headerBuf.slice(0, 12).toString('ascii');
   const functionCode = headerBuf.slice(12, 14).toString('ascii');
   const responseCode = headerBuf.slice(14, 16).toString('ascii');
   const rfu = headerBuf.slice(16, 17).toString('ascii');
+  const headerFs = headerBuf[17];
+
+  if (headerFs !== FS) {
+    throw new Error(`Malformed NETS frame header: missing FS (0x1C) delimiter at header offset 17 (got 0x${headerFs ? headerFs.toString(16) : 'none'})`);
+  }
 
   // 5. Parse Fields (starting at offset 18)
   const fields = {};
@@ -259,7 +281,10 @@ function parseNetsFrame(buffer) {
     offset += 4;
 
     let fieldDataBuf = Buffer.alloc(0);
-    if (fieldLen > 0 && offset + fieldLen <= messageBody.length) {
+    if (fieldLen > 0) {
+      if (offset + fieldLen > messageBody.length) {
+        throw new Error(`Field ${code} length (${fieldLen} bytes) overflows remaining message body`);
+      }
       fieldDataBuf = messageBody.slice(offset, offset + fieldLen);
       offset += fieldLen;
     }

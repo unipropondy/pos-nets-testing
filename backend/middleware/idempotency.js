@@ -37,7 +37,21 @@ module.exports = function idempotencyMiddleware(req, res, next) {
     }
 
     if (record.status === 'processing') {
-      // If it is still being processed by the server, return a 409 Conflict to avoid overlapping execution
+      // If it is still being processed by the server:
+      // For financial operations, wait for the pending request instead of failing hard with 409
+      if (record.emitter) {
+        console.log(`[Idempotency] Awaiting in-flight response for request ID: ${requestId}`);
+        return record.emitter.once('done', (savedRecord) => {
+          if (!savedRecord || !savedRecord.response) {
+            return res.status(500).json({ error: "Original in-flight request terminated unexpectedly." });
+          }
+          res.status(savedRecord.response.status);
+          Object.entries(savedRecord.response.headers || {}).forEach(([key, val]) => {
+            res.setHeader(key, val);
+          });
+          return res.send(savedRecord.response.body);
+        });
+      }
       return res.status(409).json({ error: "Request is already processing. Please try again." });
     }
     
@@ -49,18 +63,21 @@ module.exports = function idempotencyMiddleware(req, res, next) {
     return res.send(record.response.body);
   }
 
-  // Register request as processing to lock it
+  // Register request as processing to lock it with an EventEmitter
+  const EventEmitter = require('events');
+  const emitter = new EventEmitter();
+
   processedRequests.set(requestId, { 
     status: 'processing', 
     checksum: bodyChecksum,
-    timestamp: Date.now() 
+    timestamp: Date.now(),
+    emitter
   });
 
   // Intercept the send method to capture response once it resolves
   const originalSend = res.send;
   res.send = function (body) {
-    // Save response details to cache
-    processedRequests.set(requestId, {
+    const savedRecord = {
       status: 'resolved',
       checksum: bodyChecksum,
       timestamp: Date.now(),
@@ -69,7 +86,15 @@ module.exports = function idempotencyMiddleware(req, res, next) {
         headers: res.getHeaders(),
         body: body
       }
-    });
+    };
+
+    // Save response details to cache
+    processedRequests.set(requestId, savedRecord);
+
+    // Notify any in-flight waiting duplicates
+    try {
+      emitter.emit('done', savedRecord);
+    } catch (_) {}
 
     // Remove from memory cache after 5 minutes
     setTimeout(() => {
