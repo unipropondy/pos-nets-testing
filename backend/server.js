@@ -136,6 +136,8 @@ const http = require("http");
 const { Server } = require("socket.io");
 
 const app = express();
+// Enable Trust Proxy for accurate client IP extraction behind Cloudflare Tunnel, IIS, or reverse proxies
+app.set("trust proxy", true);
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: {
@@ -170,14 +172,22 @@ io.on("connection", (socket) => {
   });
 
   socket.on("cart_change", (data) => {
-    console.log(`🛒 [Server] Cart change relay for Table: ${data?.tableId || "global"} (items: ${data?.items?.length || 0})`);
-    // Broadcast to all other devices/tablets on LAN/Wi-Fi immediately
-    socket.broadcast.emit("cart_change", data);
+    const tableId = data?.tableId ? String(data.tableId).replace(/^\{|\}$/g, "").trim().toLowerCase() : null;
+    if (tableId) {
+      // Scoped emission to only clients viewing this specific table + all staff terminals
+      socket.to(`table_${tableId}`).emit("cart_change", data);
+    } else {
+      socket.broadcast.emit("cart_change", data);
+    }
   });
 
   socket.on("cart_updated", (data) => {
-    console.log(`🛒 [Server] Cart updated relay for Table: ${data?.tableId || "global"}`);
-    socket.broadcast.emit("cart_updated", data);
+    const tableId = data?.tableId ? String(data.tableId).replace(/^\{|\}$/g, "").trim().toLowerCase() : null;
+    if (tableId) {
+      socket.to(`table_${tableId}`).emit("cart_updated", data);
+    } else {
+      socket.broadcast.emit("cart_updated", data);
+    }
   });
 
   socket.on("table_status_updated", (data) => {
@@ -418,7 +428,10 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on("finish", () => {
     const duration = Date.now() - start;
-    console.log(`🌐 [Request] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} (${duration}ms)`);
+    // Under heavy traffic, log non-GET requests or requests that take longer than 150ms to prevent disk I/O bottlenecks
+    if (duration > 150 || req.method !== "GET" || res.statusCode >= 400) {
+      console.log(`🌐 [Request] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} (${duration}ms)`);
+    }
   });
   next();
 });
@@ -727,7 +740,78 @@ app.get("/api/logs/view", (req, res) => {
 </html>`);
 });
 
+// 🛡️ API RATE LIMITER WITH LOCAL EXEMPTIONS & CLOUDFLARE CF-CONNECTING-IP SUPPORT
+// Rate limits external spam while exempting local POS operations, LAN tablets, and payment webhooks
+const rateLimit = require("express-rate-limit");
+
+function getClientIp(req) {
+  const directRemote = (req.connection?.remoteAddress || req.socket?.remoteAddress || "").replace(/^::ffff:/, "").trim();
+  const isDirectLoopbackOrTunnel = directRemote === "127.0.0.1" || directRemote === "::1" || directRemote === "localhost" || directRemote === "";
+
+  // Cloudflare Tunnel (cloudflared) connects over local loopback (127.0.0.1) or internal LAN.
+  // Only trust proxy headers (cf-connecting-ip / x-forwarded-for) when connecting via loopback/tunnel or when request originates from QR domain.
+  if (isDirectLoopbackOrTunnel || isQrDomainRequest(req)) {
+    const cfIp = req.headers["cf-connecting-ip"];
+    if (cfIp && typeof cfIp === "string") return cfIp.trim();
+    const forwarded = req.headers["x-forwarded-for"];
+    if (forwarded && typeof forwarded === "string") {
+      const parts = forwarded.split(",");
+      return parts[0].trim();
+    }
+  }
+
+  // Direct LAN or local socket address: do not trust unverified external forwarding headers
+  return directRemote;
+}
+
+function isPrivateOrLocalIp(ip) {
+  if (!ip) return false;
+  const cleanIp = ip.replace(/^::ffff:/, "").trim();
+  if (cleanIp === "127.0.0.1" || cleanIp === "::1" || cleanIp === "localhost") return true;
+  // RFC 1918 Private LAN Ranges (Cashier POS PCs, Kitchen Tablets, Android KDS)
+  if (cleanIp.startsWith("10.") || cleanIp.startsWith("192.168.")) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanIp)) return true;
+  return false;
+}
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 1200, // 1200 requests per minute per client IP (~20 req/sec)
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // If request has a tableId (e.g., QR customer on shared carrier IP), key by IP + TableId
+    const clientIp = getClientIp(req);
+    const tableId = req.params?.tableId || req.query?.tableId || req.body?.tableId;
+    if (tableId) {
+      return `${clientIp}_table_${tableId}`;
+    }
+    return clientIp;
+  },
+  skip: (req) => {
+    // Exempt localhost, private LAN POS terminals, and critical payment callbacks
+    const ip = getClientIp(req);
+    if (isPrivateOrLocalIp(ip)) return true;
+    if (req.originalUrl.startsWith("/api/nets") || req.originalUrl.startsWith("/api/yeahpay")) return true;
+    return false;
+  },
+  message: { error: "Too many requests. Please try again in a few seconds." }
+});
+
+// ⏱️ API REQUEST TIMEOUT MIDDLEWARE (30s timeout)
+const requestTimeoutMiddleware = (req, res, next) => {
+  // Exclude long-lived payment terminal polling or reports if needed
+  req.setTimeout(30000, () => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: "Request timed out after 30 seconds" });
+    }
+  });
+  next();
+};
+
 // 🔄 Database Connection Check (for all API routes)
+app.use("/api", requestTimeoutMiddleware);
+app.use("/api", apiLimiter);
 app.use("/api", dbCheck);
 app.use("/api", idempotencyMiddleware);
 
@@ -772,7 +856,6 @@ app.use("/api/terminal", terminalRoutes);
 app.use("/api/sync", syncRoutes);
 // AI Chat Integration
 const aiRouter = require("./ai-service-src/routes/ai.routes");
-const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 
 const aiApiLimiter = rateLimit({
@@ -838,14 +921,33 @@ app.get("/health", (req, res) => {
     }
   }
 
+  const mem = process.memoryUsage();
   res.json({
     status: "ok",
     server: "Smart POS",
-    version: "3.0.0",
+    version: "3.1.0",
     localIps,
     port: process.env.PORT || 3000,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptimeSeconds: Math.floor(process.uptime()),
+    memory: {
+      rssMb: Math.round(mem.rss / 1024 / 1024),
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      heapTotalMb: Math.round(mem.heapTotal / 1024 / 1024)
+    }
   });
+});
+
+app.get("/ready", async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    if (pool && pool.connected) {
+      return res.json({ ready: true, database: "connected", timestamp: new Date().toISOString() });
+    }
+    return res.status(503).json({ ready: false, database: "disconnected" });
+  } catch (err) {
+    return res.status(503).json({ ready: false, error: err.message });
+  }
 });
 
 // Legacy support (redirects to ensure existing frontend calls don't break)

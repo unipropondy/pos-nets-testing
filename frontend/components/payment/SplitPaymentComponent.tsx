@@ -196,9 +196,6 @@ export default function SplitPaymentComponent({
   const { showToast } = useToast();  
   const [isGeneratingQR, setIsGeneratingQR] = useState(false);
 
-  // NETS Sub-option Modal state for Split Payment ('CARD' vs 'QR')
-  const [showSplitNetsModal, setShowSplitNetsModal] = useState(false);
-  const [splitNetsTargetRowId, setSplitNetsTargetRowId] = useState<string | null>(null);
   // Filter payment methods: for member collections, we shouldn't allow paying with MEMBER credit
   const availableMethods = useMemo(() => {
     if (memberFlow) {
@@ -568,34 +565,8 @@ export default function SplitPaymentComponent({
 
   const handleSelectMode = (method: PaymentMethodType) => {
     if (activeDropdownRowId) {
-      const norm = normalizeMode(method.payMode);
-      if (norm === "NETS" || norm === "NETS CARD" || norm === "NETS QR" || norm === "NETS PURCHASE") {
-        setSplitNetsTargetRowId(activeDropdownRowId);
-        setActiveDropdownRowId(null);
-        setShowSplitNetsModal(true);
-        return;
-      }
-
       handleUpdateRow(activeDropdownRowId, { payModeId: method.position });
       setActiveDropdownRowId(null);
-    }
-  };
-
-  const handleSelectSplitNetsOption = (option: "CARD" | "QR") => {
-    if (splitNetsTargetRowId) {
-      const chosenLabel = option === "QR" ? "NETS QR" : "NETS CARD";
-      const netsMethod = availableMethods.find(m => {
-        const norm = normalizeMode(m.payMode);
-        return norm === "NETS" || norm === "NETS CARD" || norm === "NETS QR" || norm === "NETS PURCHASE";
-      });
-      const pos = netsMethod ? netsMethod.position : 2;
-
-      handleUpdateRow(splitNetsTargetRowId, {
-        payModeId: pos,
-        payMode: chosenLabel,
-      });
-      setSplitNetsTargetRowId(null);
-      setShowSplitNetsModal(false);
     }
   };
 
@@ -1329,114 +1300,6 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
                 </TouchableOpacity>
               ))}
             </ScrollView>
-          </View>
-        </TouchableOpacity>
-      </Modal>
-
-      {/* NETS SUB-OPTION SELECTION MODAL FOR SPLIT PAYMENT */}
-      <Modal
-        visible={showSplitNetsModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => {
-          setShowSplitNetsModal(false);
-          setSplitNetsTargetRowId(null);
-        }}
-      >
-        <TouchableOpacity
-          style={styles.dropdownOverlay}
-          activeOpacity={1}
-          onPress={() => {
-            setShowSplitNetsModal(false);
-            setSplitNetsTargetRowId(null);
-          }}
-        >
-          <View style={[styles.dropdownModal, { maxWidth: 340, padding: 20 }]}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <FontAwesome5 name="credit-card" size={16} color={Theme.primary} />
-                <Text style={{ fontSize: 16, fontFamily: Fonts.black, color: Theme.textPrimary }}>
-                  Select NETS Option
-                </Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => {
-                  setShowSplitNetsModal(false);
-                  setSplitNetsTargetRowId(null);
-                }}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Ionicons name="close" size={20} color={Theme.textMuted} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={{ fontSize: 12, fontFamily: Fonts.medium, color: Theme.textSecondary, marginBottom: 14 }}>
-              Choose whether to pay via NETS Card or NETS Dynamic QR code:
-            </Text>
-
-            <View style={{ gap: 10 }}>
-              {/* Option 1: NETS CARD */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                style={{
-                  backgroundColor: Theme.bgMuted,
-                  padding: 12,
-                  borderRadius: 12,
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  borderWidth: 1,
-                  borderColor: Theme.border,
-                }}
-                onPress={() => handleSelectSplitNetsOption("CARD")}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-                  <View style={{ width: 36, height: 36, borderRadius: 8, backgroundColor: Theme.primary + "20", justifyContent: "center", alignItems: "center" }}>
-                    <FontAwesome5 name="credit-card" size={16} color={Theme.primary} />
-                  </View>
-                  <View>
-                    <Text style={{ fontSize: 14, fontFamily: Fonts.bold, color: Theme.textPrimary }}>
-                      NETS CARD
-                    </Text>
-                    <Text style={{ fontSize: 11, fontFamily: Fonts.medium, color: Theme.textMuted }}>
-                      Tap / Insert / FlashPay
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={Theme.textSecondary} />
-              </TouchableOpacity>
-
-              {/* Option 2: NETS QR */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                style={{
-                  backgroundColor: Theme.bgMuted,
-                  padding: 12,
-                  borderRadius: 12,
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  borderWidth: 1,
-                  borderColor: Theme.border,
-                }}
-                onPress={() => handleSelectSplitNetsOption("QR")}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-                  <View style={{ width: 36, height: 36, borderRadius: 8, backgroundColor: Theme.primary + "20", justifyContent: "center", alignItems: "center" }}>
-                    <FontAwesome5 name="qrcode" size={16} color={Theme.primary} />
-                  </View>
-                  <View>
-                    <Text style={{ fontSize: 14, fontFamily: Fonts.bold, color: Theme.textPrimary }}>
-                      NETS QR
-                    </Text>
-                    <Text style={{ fontSize: 11, fontFamily: Fonts.medium, color: Theme.textMuted }}>
-                      Scan to Pay (Terminal Screen)
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={Theme.textSecondary} />
-              </TouchableOpacity>
-            </View>
           </View>
         </TouchableOpacity>
       </Modal>

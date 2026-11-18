@@ -560,10 +560,6 @@ export default function PaymentScreen() {
   const [showCountryCodeModal, setShowCountryCodeModal] = useState(false);
   const [addingMember, setAddingMember] = useState(false);
 
-  // NETS Sub-option Modal state ('CARD' | 'QR' sub-option for main NETS button)
-  const [showNetsSubOptionModal, setShowNetsSubOptionModal] = useState(false);
-  const [netsSubOption, setNetsSubOption] = useState<"CARD" | "QR">("CARD");
-
   const handleQuickAddMember = async () => {
     if (!newName.trim() || !newPhone.trim()) {
       showToast({
@@ -1550,12 +1546,6 @@ export default function PaymentScreen() {
     if (tableId) {
       useTableNavigationStore.getState().setSelectedMethod(tableId.toString(), m.payMode);
     }
-
-    // 💳 If the user clicked the NETS button, pop open the sub-option modal (NETS CARD vs NETS QR)
-    const norm = pmNormalize(m.payMode);
-    if (norm === "NETS" || norm === "NETS CARD" || norm === "NETS QR" || norm === "NETS PURCHASE") {
-      setShowNetsSubOptionModal(true);
-    }
   };
 
   useEffect(() => {
@@ -1578,8 +1568,8 @@ export default function PaymentScreen() {
     const isYeahPay        = isYeahPayPayNow || isYeahPayCardMode;
 
     const isNetsGeneric    = _methodNorm === "NETS" || _methodNorm === "NETS PURCHASE";
-    const isNetsQrMode     = _methodNorm === "NETS QR" || _methodNorm === "NETSQR" || (isNetsGeneric && netsSubOption === "QR");
-    const isNetsCardMode   = _methodNorm === "NETS CARD" || (isNetsGeneric && netsSubOption === "CARD");
+    const isNetsQrMode     = _methodNorm === "NETS QR" || _methodNorm === "NETSQR";
+    const isNetsCardMode   = _methodNorm === "NETS CARD" || isNetsGeneric;
     const isNets           = isNetsGeneric || isNetsQrMode || isNetsCardMode;
 
     // ==========================================
@@ -1595,7 +1585,7 @@ export default function PaymentScreen() {
       setPaymentMessage(promptMsg);
       setProcessing(true);
 
-      console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (subOption: ${netsSubOption}, isQr: ${isNetsQrMode}, Amount: ${total})`);
+      console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (isQr: ${isNetsQrMode}, Amount: ${total})`);
 
       const fetchPromise = (async () => {
         try {
@@ -3330,9 +3320,12 @@ export default function PaymentScreen() {
                           const isYeahPay = m.yeahPayEnabled === true;
                           const isSelected = method === m.payMode;
                           const mUpper = pmNormalize(m.payMode);
-                          const isNets = mUpper === "NETS" || mUpper === "NETS CARD" || mUpper === "NETS QR" || mUpper === "NETS PURCHASE";
-                          const subtitle = isNets
-                            ? (netsSubOption === "QR" ? "NETS QR (Scan to Pay)" : "NETS CARD (Tap / Insert)")
+                          const isNetsQr = mUpper === "NETS QR" || mUpper === "NETSQR";
+                          const isNetsCard = mUpper === "NETS CARD" || mUpper === "NETS" || mUpper === "NETS PURCHASE";
+                          const subtitle = isNetsQr
+                            ? "Scan to Pay"
+                            : isNetsCard
+                            ? "Tap / Insert / FlashPay"
                             : null;
 
                           return (
@@ -3354,7 +3347,7 @@ export default function PaymentScreen() {
                                 ]}
                               >
                                 <FontAwesome5
-                                  name={isNets ? (netsSubOption === "QR" ? "qrcode" : "credit-card") : m.icon}
+                                  name={isNetsQr ? "qrcode" : isNetsCard ? "credit-card" : m.icon}
                                   size={isMobile ? 15 : 18}
                                   color={
                                     isSelected ? "#fff" :
@@ -5039,101 +5032,6 @@ export default function PaymentScreen() {
           </TouchableOpacity>
         </Modal>
       )}
-
-      {/* NETS SUB-OPTION SELECTION MODAL (NETS CARD vs NETS QR) */}
-      <Modal
-        visible={showNetsSubOptionModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowNetsSubOptionModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.dropdownOverlay}
-          activeOpacity={1}
-          onPress={() => setShowNetsSubOptionModal(false)}
-        >
-          <View style={[styles.adjustModalContent, { maxWidth: 360, padding: 20 }]}>
-            <View style={styles.adjustModalHeader}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <FontAwesome5 name="credit-card" size={18} color={Theme.primary} />
-                <Text style={styles.adjustModalTitle}>Select NETS Option</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => setShowNetsSubOptionModal(false)}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <Ionicons name="close" size={22} color={Theme.textMuted} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={{ fontSize: 13, fontFamily: Fonts.medium, color: Theme.textSecondary, marginBottom: 16 }}>
-              Choose whether to pay via NETS Card or NETS Dynamic QR code:
-            </Text>
-
-            <View style={{ gap: 12 }}>
-              {/* Option 1: NETS CARD */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                style={[
-                  styles.presetItem,
-                  netsSubOption === "CARD" && { borderColor: Theme.primary, borderWidth: 2, backgroundColor: Theme.primary + "10" }
-                ]}
-                onPress={() => {
-                  setNetsSubOption("CARD");
-                  setShowNetsSubOptionModal(false);
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-                  <View style={[styles.methodIconBox, { backgroundColor: Theme.primary + "20", width: 40, height: 40, borderRadius: 10 }]}>
-                    <FontAwesome5 name="credit-card" size={20} color={Theme.primary} />
-                  </View>
-                  <View>
-                    <Text style={{ fontSize: 15, fontFamily: Fonts.bold, color: Theme.textPrimary }}>
-                      NETS CARD
-                    </Text>
-                    <Text style={{ fontSize: 12, fontFamily: Fonts.medium, color: Theme.textMuted }}>
-                      Tap / Insert / FlashPay
-                    </Text>
-                  </View>
-                </View>
-                {netsSubOption === "CARD" && (
-                  <Ionicons name="checkmark-circle" size={22} color={Theme.primary} />
-                )}
-              </TouchableOpacity>
-
-              {/* Option 2: NETS QR */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                style={[
-                  styles.presetItem,
-                  netsSubOption === "QR" && { borderColor: Theme.primary, borderWidth: 2, backgroundColor: Theme.primary + "10" }
-                ]}
-                onPress={() => {
-                  setNetsSubOption("QR");
-                  setShowNetsSubOptionModal(false);
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-                  <View style={[styles.methodIconBox, { backgroundColor: Theme.primary + "20", width: 40, height: 40, borderRadius: 10 }]}>
-                    <FontAwesome5 name="qrcode" size={20} color={Theme.primary} />
-                  </View>
-                  <View>
-                    <Text style={{ fontSize: 15, fontFamily: Fonts.bold, color: Theme.textPrimary }}>
-                      NETS QR
-                    </Text>
-                    <Text style={{ fontSize: 12, fontFamily: Fonts.medium, color: Theme.textMuted }}>
-                      Scan to Pay (Terminal Screen)
-                    </Text>
-                  </View>
-                </View>
-                {netsSubOption === "QR" && (
-                  <Ionicons name="checkmark-circle" size={22} color={Theme.primary} />
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </TouchableOpacity>
-      </Modal>
 
       {/* CANCEL BILL MODAL */}
       <CancelOrderModal

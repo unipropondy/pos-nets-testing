@@ -68,6 +68,8 @@ const normalizeReportPayModeSql = (columnName = "sts.PayMode", settlementIdColum
           WHEN (UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('PAYNOW', '3') OR UPPER(resolved.val) LIKE '%PAYNOW%') AND UPPER(resolved.val) NOT LIKE '%YEAHPAY%' THEN 'PAYNOW'
           WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('GRAB', '10') OR UPPER(resolved.val) LIKE '%GRAB%' THEN 'GRAB'
           WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('FOODPANDA', '9') OR UPPER(resolved.val) LIKE '%FOODPANDA%' THEN 'FOODPANDA'
+          WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('NETS QR', 'NETSQR', '22') OR UPPER(resolved.val) LIKE '%NETS%QR%' THEN 'NETS QR'
+          WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('NETS CARD', 'NETSCARD', '21') OR UPPER(resolved.val) LIKE '%NETS%CARD%' THEN 'NETS CARD'
           WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('NETS', '2') OR UPPER(resolved.val) LIKE '%NETS%' THEN 'NETS'
           WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('UPI', '4') OR UPPER(resolved.val) LIKE '%UPI%' OR UPPER(resolved.val) LIKE '%GPAY%' THEN 'UPI'
           WHEN UPPER(LTRIM(RTRIM(ISNULL(resolved.val, '')))) IN ('MEMBER', '5') OR UPPER(resolved.val) LIKE '%MEMBER%' THEN 'MEMBER'
@@ -1034,7 +1036,7 @@ router.get("/login-wise-sales", async (req, res) => {
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('CASH','CAS','1') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS CashAmount,
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('CARD','VISA','MASTER','MASTERCARD','AMEX') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS CardAmount,
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('PAYNOW','3') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS PayNowAmount,
-          ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('NETS','2') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS NetsAmount,
+          ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND (UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('NETS','2','NETS CARD','21','NETS QR','22') OR UPPER(sts.PayMode) LIKE 'NETS%') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS NetsAmount,
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('MEMBER','5') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS MemberAmount,
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('CREDIT','6') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS CreditAmount,
           ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(LTRIM(RTRIM(ISNULL(sts.PayMode,'')))) IN ('GRAB','10') THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS GrabAmount,
@@ -3029,7 +3031,6 @@ router.post("/save", async (req, res) => {
             const childTablesRes = await transaction.request()
               .input("orderNo", sql.NVarChar(50), displayOrderId)
               .input("guidOid", sql.UniqueIdentifier, guidOrderId || DEFAULT_GUID)
-              .input("targetTno", sql.NVarChar(50), String(targetTableNoVal))
               .query(`
                 SELECT tm.TableId, tm.TableNumber, tm.DiningSection
                 FROM OrderMergeHistory omh
@@ -3038,8 +3039,7 @@ router.post("/save", async (req, res) => {
                   OR TRY_CAST(omh.ChildOrderId AS NVARCHAR(100)) = TRY_CAST(tm.CurrentOrderId AS NVARCHAR(100))
                   OR TRY_CAST(omh.ChildOrderId AS NVARCHAR(100)) = TRY_CAST(tm.TableId AS NVARCHAR(100))
                 )
-                WHERE omh.ParentOrderId = @guidOid 
-                   OR omh.ParentTableNo = @targetTno
+                WHERE (omh.ParentOrderId = @guidOid AND @guidOid <> '00000000-0000-0000-0000-000000000000')
                    OR omh.ParentOrderId IN (SELECT OrderId FROM RestaurantOrderCur WHERE OrderNumber = @orderNo)
                    OR omh.ParentOrderId IN (SELECT OrderId FROM RestaurantOrder WHERE OrderNumber = @orderNo)
               `);
@@ -3107,7 +3107,6 @@ router.post("/save", async (req, res) => {
           await transaction.request()
             .input("orderNo", sql.NVarChar(50), displayOrderId)
             .input("guidOid", sql.UniqueIdentifier, guidOrderId || DEFAULT_GUID)
-            .input("targetTno", sql.NVarChar(50), String(targetTableNo))
             .query(`
               UPDATE RestaurantOrderCur 
               SET isOrderClosed = 1, ModifiedOn = GETDATE() 
@@ -3115,8 +3114,7 @@ router.post("/save", async (req, res) => {
                  OR OrderId IN (
                    SELECT omh.ChildOrderId 
                    FROM OrderMergeHistory omh
-                   WHERE omh.ParentOrderId = @guidOid 
-                      OR omh.ParentTableNo = @targetTno
+                   WHERE (omh.ParentOrderId = @guidOid AND @guidOid <> '00000000-0000-0000-0000-000000000000')
                       OR omh.ParentOrderId IN (SELECT OrderId FROM RestaurantOrderCur WHERE OrderNumber = @orderNo)
                       OR omh.ParentOrderId IN (SELECT OrderId FROM RestaurantOrder WHERE OrderNumber = @orderNo)
                  )

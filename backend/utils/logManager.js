@@ -110,11 +110,19 @@ function cleanOldLogs(baseDirectory) {
   }
 }
 
-// Thread-safe log append with sanitization and rotation
-function writeToLogFile(filePath, message, level = 'INFO') {
-  const timestamp = new Date().toISOString();
-  const cleanMsg = sanitizeLogMessage(message);
-  const line = `[${timestamp}] [${level}] ${cleanMsg}\n`;
+// Asynchronous buffered log writer to prevent synchronous disk I/O from blocking event loop under high load
+const logBuffers = new Map(); // filePath -> Array<string>
+const isFlushing = new Map();  // filePath -> boolean
+const MAX_BUFFER_LINES = 5000; // Bound queue size to prevent memory leaks if disk is full or slow
+
+function flushLogBuffer(filePath, isSync = false) {
+  const buf = logBuffers.get(filePath);
+  if (!buf || buf.length === 0) {
+    isFlushing.set(filePath, false);
+    return;
+  }
+  isFlushing.set(filePath, true);
+  const chunk = buf.splice(0, buf.length).join('\n') + '\n';
 
   try {
     const parentDir = path.dirname(filePath);
@@ -122,8 +130,76 @@ function writeToLogFile(filePath, message, level = 'INFO') {
       fs.mkdirSync(parentDir, { recursive: true });
     }
     rotateLogIfNeeded(filePath);
-    fs.appendFileSync(filePath, line, 'utf8');
-  } catch { }
+
+    if (isSync) {
+      try {
+        fs.appendFileSync(filePath, chunk, 'utf8');
+      } catch (err) {
+        // Disk full or write error: drop chunk gracefully to avoid process crash
+      }
+      isFlushing.set(filePath, false);
+      return;
+    }
+
+    fs.appendFile(filePath, chunk, 'utf8', (err) => {
+      if (err) {
+        // Disk write failed (e.g. out of disk space) -> skip to prevent crashing
+      }
+      const remaining = logBuffers.get(filePath);
+      if (remaining && remaining.length > 0) {
+        setImmediate(() => flushLogBuffer(filePath, false));
+      } else {
+        isFlushing.set(filePath, false);
+      }
+    });
+  } catch (err) {
+    isFlushing.set(filePath, false);
+  }
+}
+
+// Synchronously flush all active log buffers on process exit or termination
+function flushAllLogsSync() {
+  for (const filePath of logBuffers.keys()) {
+    flushLogBuffer(filePath, true);
+  }
+}
+
+// Periodic flusher every 2 seconds to guarantee logs are written even during low-frequency periods
+setInterval(() => {
+  for (const [filePath, buf] of logBuffers.entries()) {
+    if (buf && buf.length > 0 && !isFlushing.get(filePath)) {
+      flushLogBuffer(filePath, false);
+    }
+  }
+}, 2000).unref();
+
+// Process exit hooks for clean log persistence
+process.on('exit', () => flushAllLogsSync());
+process.on('SIGINT', () => { flushAllLogsSync(); process.exit(0); });
+process.on('SIGTERM', () => { flushAllLogsSync(); process.exit(0); });
+
+// Non-blocking log append with sanitization and rotation
+function writeToLogFile(filePath, message, level = 'INFO') {
+  const timestamp = new Date().toISOString();
+  const cleanMsg = sanitizeLogMessage(message);
+  const line = `[${timestamp}] [${level}] ${cleanMsg}`;
+
+  let buf = logBuffers.get(filePath);
+  if (!buf) {
+    buf = [];
+    logBuffers.set(filePath, buf);
+  }
+
+  // Bounded buffer check: if buffer exceeds 5,000 lines (e.g. disk stalled), drop oldest line
+  if (buf.length >= MAX_BUFFER_LINES) {
+    buf.shift();
+  }
+  buf.push(line);
+
+  if (!isFlushing.get(filePath)) {
+    isFlushing.set(filePath, true);
+    setImmediate(() => flushLogBuffer(filePath, false));
+  }
 }
 
 module.exports = {
@@ -132,6 +208,7 @@ module.exports = {
   rotateLogIfNeeded,
   cleanOldLogs,
   writeToLogFile,
+  flushAllLogsSync,
   RETENTION_DAYS
 };
 

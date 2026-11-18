@@ -1753,10 +1753,33 @@ router.get("/cart/:tableId", async (req, res) => {
     let currentOrderId = tableRow?.CurrentOrderId;
     const tableStatus = Number(tableRow?.Status ?? 0);
 
-    // 🛡️ CRITICAL GUARD: If the table is officially Available (Status = 0), it MUST NOT return any cart items!
-    if (tableStatus === 0) {
+    // 🛡️ CRITICAL GUARD: Check if the table has an active unclosed order with items in RestaurantOrderCur
+    // Never return an empty cart if a valid unpaid order with existing detail items exists for this table,
+    // even if TableMaster.Status was temporarily set to 0.
+    let activeOpenOrder = null;
+    try {
+      const activeCheck = await pool
+        .request()
+        .input("tableNo", sql.VarChar(20), String(tableNumber || ""))
+        .input("tid", sql.VarChar(50), cleanId)
+        .query(`
+          SELECT TOP 1 h.OrderId, h.OrderNumber, h.isOrderClosed, h.CreatedOn
+          FROM RestaurantOrderCur h
+          WHERE (RTRIM(LTRIM(h.Tableno)) = RTRIM(LTRIM(@tableNo)) OR RTRIM(LTRIM(h.Tableno)) = RTRIM(LTRIM(@tid)))
+            AND (h.isOrderClosed = 0 OR h.isOrderClosed IS NULL)
+            AND h.OrderNumber IS NOT NULL AND h.OrderNumber NOT IN ('PENDING', 'NEW', '#NEW', '') AND h.OrderNumber NOT LIKE 'TEMP-%'
+            AND NOT EXISTS (SELECT 1 FROM SettlementHeader sh WHERE sh.BillNo = h.OrderNumber)
+            AND EXISTS (SELECT 1 FROM RestaurantOrderDetailCur d WHERE d.OrderId = h.OrderId AND d.StatusCode <> 0)
+          ORDER BY h.CreatedOn DESC
+        `);
+      activeOpenOrder = activeCheck.recordset[0] || null;
+    } catch (checkErr) {
+      console.warn("⚠️ [Cart] Error verifying active order existence:", checkErr.message);
+    }
+
+    if (tableStatus === 0 && !activeOpenOrder) {
       if (currentOrderId) {
-        // Clean up any dangling stale CurrentOrderId in DB
+        // Clean up any dangling stale CurrentOrderId in DB (read-only safe check)
         await pool.request()
           .input("tid", sql.VarChar(50), cleanId)
           .query("UPDATE TableMaster SET CurrentOrderId = NULL, TotalAmount = 0, StartTime = NULL WHERE TableNumber = @tid OR (TRY_CAST(@tid AS UNIQUEIDENTIFIER) IS NOT NULL AND TableId = TRY_CAST(@tid AS UNIQUEIDENTIFIER))")
@@ -1765,8 +1788,9 @@ router.get("/cart/:tableId", async (req, res) => {
       return res.json({ items: [], currentOrderId: null, orderDiscount: null });
     }
 
-    // 🚀 RESOLVE ACTIVE DB ORDER ID: If TableMaster has no current order ID, check RestaurantOrderCur
-    if (!currentOrderId || currentOrderId === "NEW" || currentOrderId === "PENDING" || currentOrderId.length < 5) {
+    if (activeOpenOrder) {
+      currentOrderId = activeOpenOrder.OrderNumber;
+    } else if (!currentOrderId || currentOrderId === "NEW" || currentOrderId === "PENDING" || currentOrderId.length < 5) {
       try {
         const activeDbOrder = await pool
           .request()
@@ -1778,16 +1802,12 @@ router.get("/cart/:tableId", async (req, res) => {
             WHERE (RTRIM(LTRIM(Tableno)) = RTRIM(LTRIM(@tableNo)) OR RTRIM(LTRIM(Tableno)) = RTRIM(LTRIM(@tid)))
               AND (isOrderClosed = 0 OR isOrderClosed IS NULL)
               AND OrderNumber IS NOT NULL AND OrderNumber NOT IN ('PENDING', 'NEW', '#NEW', '') AND OrderNumber NOT LIKE 'TEMP-%'
+              AND NOT EXISTS (SELECT 1 FROM SettlementHeader sh WHERE sh.BillNo = RestaurantOrderCur.OrderNumber)
             ORDER BY CreatedOn DESC
           `);
         const dbOrderNo = activeDbOrder.recordset[0]?.OrderNumber;
         if (dbOrderNo) {
           currentOrderId = dbOrderNo;
-          // Sync it back to TableMaster
-          await pool.request()
-            .input("tid", sql.VarChar(50), cleanId)
-            .input("oid", sql.NVarChar(50), currentOrderId)
-            .query("UPDATE TableMaster SET CurrentOrderId = @oid, StartTime = ISNULL(StartTime, GETDATE()) WHERE TableNumber = @tid OR (TRY_CAST(@tid AS UNIQUEIDENTIFIER) IS NOT NULL AND TableId = TRY_CAST(@tid AS UNIQUEIDENTIFIER))");
         }
       } catch (err) {
         console.warn("⚠️ Failed to resolve active DB order in /cart:", err.message);

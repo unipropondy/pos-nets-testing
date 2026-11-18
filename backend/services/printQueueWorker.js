@@ -249,22 +249,41 @@ async function processPrintQueue() {
       return;
     }
 
-    // Update heartbeat every 3 seconds (threshold in bridge-status is 8 seconds) to eliminate 2 SQL queries/sec
+    // Update heartbeat every 3 seconds (threshold in bridge-status is 8 seconds) to eliminate redundant SQL queries
     const now = Date.now();
     if (now - lastHeartbeatUpdate >= 3000) {
       lastHeartbeatUpdate = now;
       await pool.request().query("UPDATE CompanySettings SET LastBridgeHeartbeat = GETDATE() WHERE Id = '1'").catch(() => {});
     }
 
-    // Fetch pending jobs
-    const pendingRes = await pool.request().query(`
-      SELECT TOP 5 JobId, PrinterIp, PrinterPort, PrinterName, Content, Attempts 
-      FROM PrintJobQueue 
-      WHERE Status = 'PENDING' AND (Attempts < 3)
-      ORDER BY CreatedOn ASC
-    `).catch(() => ({ recordset: [] }));
+    // 🚀 ATOMIC JOB CLAIMING (ROWLOCK, READPAST, UPDLOCK):
+    // Atomically transition up to 3 pending jobs into PROCESSING with Attempts incremented.
+    // READPAST guarantees that multiple concurrent workers or processes NEVER block or collide on the same job.
+    const claimRes = await pool.request().query(`
+      WITH NextJobs AS (
+        SELECT TOP 3 JobId, Status, ProcessedOn, Attempts, PrinterIp, PrinterPort, PrinterName, Content
+        FROM PrintJobQueue WITH (ROWLOCK, READPAST, UPDLOCK)
+        WHERE Status = 'PENDING' AND (Attempts < 3)
+        ORDER BY CreatedOn ASC
+      )
+      UPDATE NextJobs
+      SET Status = 'PROCESSING',
+          ProcessedOn = GETDATE(),
+          Attempts = Attempts + 1
+      OUTPUT 
+        inserted.JobId, 
+        inserted.Status, 
+        inserted.Attempts, 
+        inserted.PrinterIp, 
+        inserted.PrinterPort, 
+        inserted.PrinterName, 
+        inserted.Content;
+    `).catch((err) => {
+      console.warn("⚠️ [PrintWorker] Atomic claim error:", err.message);
+      return { recordset: [] };
+    });
 
-    const jobs = pendingRes.recordset || [];
+    const jobs = claimRes.recordset || [];
     for (const job of jobs) {
       const { JobId, PrinterIp, PrinterPort, Content, Attempts } = job;
       if (!Content || !PrinterIp || PrinterIp.trim() === "") {
@@ -275,12 +294,6 @@ async function processPrintQueue() {
         continue;
       }
 
-      // Mark as PROCESSING
-      await pool.request()
-        .input("JobId", sql.UniqueIdentifier, JobId)
-        .query("UPDATE PrintJobQueue SET Status = 'PROCESSING', Attempts = Attempts + 1, ProcessedOn = GETDATE() WHERE JobId = @JobId")
-        .catch(() => {});
-
       try {
         await sendToPrinter(PrinterIp, PrinterPort, Content);
         await pool.request()
@@ -289,8 +302,8 @@ async function processPrintQueue() {
           .catch(() => {});
         console.log(`🖨️ [PrintWorker] Print job ${JobId} completed successfully on ${PrinterIp}:${PrinterPort || 9100}`);
       } catch (err) {
-        console.warn(`⚠️ [PrintWorker] Print job ${JobId} attempt ${Attempts + 1} failed on ${PrinterIp}: ${err.message}`);
-        const nextStatus = (Attempts + 1 >= 3) ? 'FAILED' : 'PENDING';
+        console.warn(`⚠️ [PrintWorker] Print job ${JobId} attempt ${Attempts} failed on ${PrinterIp}: ${err.message}`);
+        const nextStatus = (Attempts >= 3) ? 'FAILED' : 'PENDING';
         await pool.request()
           .input("JobId", sql.UniqueIdentifier, JobId)
           .input("ErrMsg", sql.NVarChar(sql.MAX), err.message)
@@ -305,9 +318,31 @@ async function processPrintQueue() {
   }
 }
 
+// 🔄 CRASH RECOVERY: On backend startup, safely recover abandoned PROCESSING jobs older than 60 seconds back to PENDING
+async function recoverAbandonedPrintJobs() {
+  try {
+    const pool = getPool();
+    if (!pool || !pool.connected) return;
+    const res = await pool.request().query(`
+      UPDATE PrintJobQueue
+      SET Status = 'PENDING'
+      WHERE Status = 'PROCESSING'
+        AND (ProcessedOn < DATEADD(SECOND, -60, GETDATE()) OR ProcessedOn IS NULL)
+        AND Attempts < 3;
+    `);
+    const recovered = res.rowsAffected[0] || 0;
+    if (recovered > 0) {
+      console.log(`🖨️ [PrintWorker] Recovered ${recovered} abandoned PROCESSING jobs back to PENDING.`);
+    }
+  } catch (err) {
+    console.warn("⚠️ [PrintWorker] Abandoned job recovery error:", err.message);
+  }
+}
+
 function startPrintQueueWorker() {
   if (workerIntervalId) return;
-  console.log("🖨️ [PrintWorker] Starting Local Background Print Queue Worker (polling every 500ms)...");
+  console.log("🖨️ [PrintWorker] Starting Local Background Print Queue Worker with Atomic Claiming (every 500ms)...");
+  recoverAbandonedPrintJobs();
   workerIntervalId = setInterval(processPrintQueue, 500);
   processPrintQueue();
 }

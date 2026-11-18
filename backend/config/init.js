@@ -679,6 +679,33 @@ async function initDB(pool) {
       END
     `);
 
+    // 12b. Insert dynamic NETS CARD & NETS QR Paymodes if missing
+    await runQuery("Insert NETS CARD Paymode", `
+      IF NOT EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE LTRIM(RTRIM(UPPER(PayMode))) = 'NETS CARD' OR LTRIM(RTRIM(UPPER(Description))) = 'NETS CARD')
+      BEGIN
+          DECLARE @PosCard DECIMAL(18, 0) = 21;
+          IF EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE Position = @PosCard)
+          BEGIN
+              SELECT @PosCard = ISNULL(MAX(Position), 20) + 1 FROM [dbo].[Paymode];
+          END;
+          INSERT INTO [dbo].[Paymode] (Position, PayMode, Description, Active, Commission, ServiceCharge, isEntertainment, isVoucher, YeahPayEnabled, CreateDate)
+          VALUES (@PosCard, 'NETS CARD', 'NETS CARD', 1, 0, 0, 0, 0, 0, GETDATE())
+      END
+    `);
+
+    await runQuery("Insert NETS QR Paymode", `
+      IF NOT EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE LTRIM(RTRIM(UPPER(PayMode))) = 'NETS QR' OR LTRIM(RTRIM(UPPER(Description))) = 'NETS QR')
+      BEGIN
+          DECLARE @PosQr DECIMAL(18, 0) = 22;
+          IF EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE Position = @PosQr)
+          BEGIN
+              SELECT @PosQr = ISNULL(MAX(Position), 21) + 1 FROM [dbo].[Paymode];
+          END;
+          INSERT INTO [dbo].[Paymode] (Position, PayMode, Description, Active, Commission, ServiceCharge, isEntertainment, isVoucher, YeahPayEnabled, CreateDate)
+          VALUES (@PosQr, 'NETS QR', 'NETS QR', 1, 0, 0, 0, 0, 0, GETDATE())
+      END
+    `);
+
     // 13. Create AIChatSessions and AIChatMessages tables
     await runQuery("Create AIChatSessions", `
       IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[AIChatSessions]') AND type in (N'U'))
