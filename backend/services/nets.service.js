@@ -6,6 +6,7 @@ const {
   buildNetsFrame,
   parseNetsFrame,
   formatAmount,
+  fromBcd2,
   getNetsResponseDescription,
   sanitizeFieldsForLogging,
   sanitizeRawHex,
@@ -200,15 +201,15 @@ class NetsService {
         socket.destroy();
       };
 
-      const finishSuccess = (buf) => {
+      const finishSuccess = (buf, remainingBuf = Buffer.alloc(0)) => {
         if (isResolved) return;
         isResolved = true;
         const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [NETS Socket] RX Frame Complete (${buf.length} bytes, duration=${duration}ms): ${sanitizeRawHex(buf.toString('hex'))}`);
+        console.log(`[${new Date().toISOString()}] [NETS Socket] RX Frame Complete (${buf.length} bytes, remaining=${remainingBuf.length} bytes, duration=${duration}ms): ${sanitizeRawHex(buf.toString('hex'))}`);
         cleanup();
         try {
           const parsed = parseNetsFrame(buf);
-          resolve({ parsed, rawHex: buf.toString('hex') });
+          resolve({ parsed, rawHex: buf.toString('hex'), remainingBytes: remainingBuf });
         } catch (err) {
           console.error(`[${new Date().toISOString()}] [NETS Socket] RX Frame Parse Error: ${err.message}`);
           err.isUncertain = requestDispatched;
@@ -308,9 +309,14 @@ class NetsService {
 
         // Complete Frame Received
         // Validate that full frame is present before passing to finishSuccess
+        // Preserve any additional bytes received beyond the complete frame
         if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
           const completeFrame = responseBuffer.slice(0, expectedTotalLength);
-          finishSuccess(completeFrame);
+          const remainingBuffer = responseBuffer.slice(expectedTotalLength);
+          if (remainingBuffer.length > 0) {
+            console.log(`[${new Date().toISOString()}] [NETS Socket] Preserved trailing ${remainingBuffer.length} bytes beyond complete frame`);
+          }
+          finishSuccess(completeFrame, remainingBuffer);
         }
       });
 
@@ -326,7 +332,9 @@ class NetsService {
         console.log(`[${new Date().toISOString()}] [NETS Socket] Socket closed event: hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}`);
         if (!isResolved) {
           if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
-            finishSuccess(responseBuffer.slice(0, expectedTotalLength));
+            const completeFrame = responseBuffer.slice(0, expectedTotalLength);
+            const remainingBuffer = responseBuffer.slice(expectedTotalLength);
+            finishSuccess(completeFrame, remainingBuffer);
           } else {
             const closeErr = new Error(
               requestDispatched
