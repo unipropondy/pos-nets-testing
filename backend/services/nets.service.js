@@ -181,7 +181,7 @@ class NetsService {
    * @param {Function} onProgress
    * @returns {Promise<{parsed: Object, rawHex: string}>}
    */
-  async sendPacket(frameBuffer, timeoutMs = 35000, onProgress = null) {
+  async sendPacket(frameBuffer, timeoutMs = 35000, onProgress = null, context = {}) {
     const { terminalIp, terminalPort, connectionTimeoutMs } = this.config;
 
     return new Promise((resolve, reject) => {
@@ -208,7 +208,7 @@ class NetsService {
         console.log(`[${new Date().toISOString()}] [NETS Socket] RX Frame Complete (${buf.length} bytes, remaining=${remainingBuf.length} bytes, duration=${duration}ms): ${sanitizeRawHex(buf.toString('hex'))}`);
         cleanup();
         try {
-          const parsed = parseNetsFrame(buf);
+          const parsed = parseNetsFrame(buf, { context });
           resolve({ parsed, rawHex: buf.toString('hex'), remainingBytes: remainingBuf });
         } catch (err) {
           console.error(`[${new Date().toISOString()}] [NETS Socket] RX Frame Parse Error: ${err.message}`);
@@ -601,7 +601,11 @@ class NetsService {
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Frame Dispatched: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
 
-      const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress);
+      const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+        isQr: txnType === '04',
+        txnType,
+        flowName,
+      });
       this.isProcessing = false;
 
       const isApproved = res.parsed.isApproved;
