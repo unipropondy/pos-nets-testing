@@ -1609,18 +1609,25 @@ export default function PaymentScreen() {
           let status: "success" | "cancelled" | "failed" = "failed";
           let message = "";
 
+          const isCancelled = result.isCancelled || result.status === 'cancelled' || result.responseCode === 'XX';
+          const isTimeout = result.isTimeout || result.status === 'timeout' || result.responseCode === 'TO' || result.errorCode === 'ETIMEDOUT';
+          const isUnknown = result.isUnknownStatus || result.status === 'unknown' || result.errorCode === 'ERECONCILIATIONREQUIRED';
+
           if (result.success && result.approved) {
             status = "success";
-            message = `✅ ${currencySymbol}${total.toFixed(2)} paid successfully via ${method} (Approval: ${result.approvalCode || result.stan})`;
-          } else if (result.responseCode === 'XX') {
+            message = `Payment Successful: ${currencySymbol}${total.toFixed(2)} paid via ${method} (Approval: ${result.approvalCode || result.stan})`;
+          } else if (isCancelled) {
             status = "cancelled";
-            message = `❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction cancelled on terminal`;
-          } else if (result.responseCode === 'TO') {
+            message = "Transaction Cancelled";
+          } else if (isUnknown) {
             status = "failed";
-            message = `⏰ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction timeout`;
+            message = "Transaction Status Unknown";
+          } else if (isTimeout) {
+            status = "failed";
+            message = "Transaction Timed Out";
           } else {
             status = "failed";
-            message = `❌ ${result.error || result.responseDescription || (isNetsQrMode ? 'NETS QR payment declined' : 'NETS Card payment declined')}`;
+            message = result.error || result.responseDescription || `${method} payment declined`;
           }
 
           if (ongoingPayments[cacheKey]) {
@@ -1632,20 +1639,25 @@ export default function PaymentScreen() {
             useTerminalPaymentStore.getState().updateSession(context.tableId, { status, message });
           }
 
+          setProcessing(false);
+          setPaymentStatus(status);
+          setPaymentMessage(message);
+
           if (status === "success") {
             handleTerminalPaymentSuccess(method, total, message);
           } else if (status === "cancelled") {
-            setPaymentMessage(message);
-            Alert.alert('❌ Transaction Cancelled', `${isNetsQrMode ? 'QR' : 'Card'} payment was cancelled on the NETS terminal. Please try again.`);
+            Alert.alert('Transaction Cancelled', `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction was cancelled on the terminal. You may retry or choose another payment mode.`);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
             }
             delete ongoingPayments[cacheKey];
           } else {
-            setProcessing(false);
-            setPaymentStatus("failed");
-            setPaymentMessage(message);
-            Alert.alert(`❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Failed`, message);
+            const alertTitle = isUnknown
+              ? 'Transaction Status Unknown'
+              : isTimeout
+                ? 'Transaction Timed Out'
+                : `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Payment Failed`;
+            Alert.alert(alertTitle, message);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
             }
@@ -1654,8 +1666,14 @@ export default function PaymentScreen() {
           return result;
         } catch (error: any) {
           console.error(`❌ [MainPayment] NETS ${isNetsQrMode ? 'QR' : 'Card'} error:`, error);
+          const isTimeout = /timed? ?out/i.test(error.message || '') || error.code === 'ETIMEDOUT';
+          const isUnknown = /reconciliation|uncertain/i.test(error.message || '');
           const status = "failed";
-          const message = `❌ ${error.message}`;
+          const message = isUnknown
+            ? 'Transaction Status Unknown'
+            : isTimeout
+              ? 'Transaction Timed Out'
+              : (error.message || 'Payment failed');
 
           if (ongoingPayments[cacheKey]) {
             ongoingPayments[cacheKey].status = status;
@@ -1668,9 +1686,14 @@ export default function PaymentScreen() {
           setProcessing(false);
           setPaymentStatus("failed");
           setPaymentMessage(message);
-          Alert.alert(`❌ ${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Failed`, message);
+          const alertTitle = isUnknown
+            ? 'Transaction Status Unknown'
+            : isTimeout
+              ? 'Transaction Timed Out'
+              : `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Payment Failed`;
+          Alert.alert(alertTitle, message);
           delete ongoingPayments[cacheKey];
-          return { success: false, error: error.message };
+          return { success: false, error: message };
         }
       })();
 

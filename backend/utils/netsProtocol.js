@@ -153,7 +153,11 @@ function buildNetsFrame({ ecn, functionCode, versionCode = '01', responseCode = 
  * Validates whether a response is strictly approved according to:
  * 1. Terminal Response Code == '00'
  * 2. Host Response Code (Field HC) == '00' (Mandatory for financial transactions; must not be missing or declined)
- * 3. Approval Code (Field 01) present, non-empty, and != '000000'
+ * 3. Approval Code:
+ *    - For standard Card transactions: Field 01 must be present, non-empty, and != '000000'.
+ *    - For NETS QR transactions (FC 30 T2=04 or FC Q2): Per NETS ECR II specifications, QR transactions
+ *      originate via mobile banking (FAST/PayNow/SGQR) where Field 01 is returned by the terminal as blank spaces
+ *      (e.g., '      '). When RC='00' and HC='00' are both confirmed, a blank or space-filled Field 01 is valid.
  *
  * @param {string} functionCode
  * @param {string} responseCode
@@ -165,6 +169,10 @@ function validateApprovalStatus(functionCode, responseCode, fields = {}) {
   const rc = (responseCode || '').trim();
   const approvalCode = (fields['01'] || '').trim();
   const hostResponseCode = fields['HC'] !== undefined && fields['HC'] !== null ? String(fields['HC']).trim() : null;
+  const txnType = fields['T2'] !== undefined && fields['T2'] !== null ? String(fields['T2']).trim() : null;
+
+  // Identify QR transactions: Function code Q2, or Function code 30 with T2='04'
+  const isQrTxn = fn === 'Q2' || (fn === '30' && txnType === '04');
 
   // Administrative / non-financial transactions (e.g. 55, 80, 81, 84, I5)
   // Approval code is not required; responseCode '00' indicates success.
@@ -178,8 +186,8 @@ function validateApprovalStatus(functionCode, responseCode, fields = {}) {
     };
   }
 
-  // Financial transactions: STRICT 3-WAY VALIDATION
-  // Check 1: Terminal Response Code
+  // Financial transactions: STRICT VALIDATION
+  // Check 1: Terminal Response Code (Must be '00')
   if (rc !== '00') {
     return {
       isApproved: false,
@@ -203,7 +211,25 @@ function validateApprovalStatus(functionCode, responseCode, fields = {}) {
     };
   }
 
-  // Check 3: Approval Code (Field 01)
+  // Check 3: Approval Code Validation
+  // For NETS QR: Field 01 may be blank/spaces as documented in NETS ECR II for SGQR / mobile banking debit.
+  // Both RC='00' and HC='00' have passed at this point.
+  if (isQrTxn) {
+    // If Field 01 contains a non-empty code (e.g., host assigned code), ensure it's not all zeroes.
+    if (approvalCode && approvalCode === '000000') {
+      return {
+        isApproved: false,
+        reason: `Invalid Approval Code (Field 01): '${approvalCode}'`,
+      };
+    }
+
+    return {
+      isApproved: true,
+      reason: 'Approved (NETS QR: Terminal RC=00, Host HC=00)',
+    };
+  }
+
+  // For Standard NETS Card & Other Financial Txns: Strict Field 01 required
   if (!approvalCode || approvalCode.length === 0 || approvalCode === '000000') {
     return {
       isApproved: false,

@@ -9,12 +9,20 @@ router.get("/total-sales/:terminal", async (req, res) => {
     const pool = await poolPromise;
     const request = pool.request();
 
-    let dateFilter = "CAST(COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE), CAST(sh.CreatedOn AS DATE)) AS DATE) = CAST(GETDATE() AS DATE)";
+    let dateFilter = `(
+      (sh.start_date = CAST(GETDATE() AS DATE))
+      OR (sh.start_date IS NULL AND sh.LastSettlementDate >= CAST(GETDATE() AS DATE) AND sh.LastSettlementDate < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+      OR (sh.start_date IS NULL AND sh.LastSettlementDate IS NULL AND sh.CreatedOn >= CAST(GETDATE() AS DATE) AND sh.CreatedOn < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+    )`;
 
     if (fromDate && toDate) {
       const fDate = fromDate.replace(/[^0-9T:.-]/g, '');
       const tDate = toDate.replace(/[^0-9T:.-]/g, '');
-      dateFilter = `CAST(COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE), CAST(sh.CreatedOn AS DATE)) AS DATE) BETWEEN CAST('${fDate}' AS DATE) AND CAST('${tDate}' AS DATE)`;
+      dateFilter = `(
+        (sh.start_date >= CAST('${fDate}' AS DATE) AND sh.start_date <= CAST('${tDate}' AS DATE))
+        OR (sh.start_date IS NULL AND sh.LastSettlementDate >= CAST('${fDate}' AS DATE) AND sh.LastSettlementDate < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+        OR (sh.start_date IS NULL AND sh.LastSettlementDate IS NULL AND sh.CreatedOn >= CAST('${fDate}' AS DATE) AND sh.CreatedOn < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+      )`;
     }
 
     let userFilter = "";
@@ -60,18 +68,44 @@ router.get("/payment/:terminal/:userId", async (req, res) => {
 
     request.input("TerminalCode", sql.VarChar, terminal);
     // Build the date filter expressions for each data source
-    let shDateFilter     = "CAST(COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE), CAST(sh.CreatedOn AS DATE)) AS DATE) = CAST(GETDATE() AS DATE)";
-    let cctBizDateFilter = "CAST(COALESCE(start_date, CreatedDate) AS DATE) = CAST(GETDATE() AS DATE)";
-    let ptdDateFilter    = "COALESCE(ptd.start_date, CAST(ptd.CreatedDate AS DATE)) = CAST(GETDATE() AS DATE)";
-    let pdcDateFilter    = "COALESCE(pdc.start_date, CAST(pdc.CreatedOn AS DATE)) = CAST(GETDATE() AS DATE)";
+    let shDateFilter = `(
+      (sh.start_date = CAST(GETDATE() AS DATE))
+      OR (sh.start_date IS NULL AND sh.LastSettlementDate >= CAST(GETDATE() AS DATE) AND sh.LastSettlementDate < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+      OR (sh.start_date IS NULL AND sh.LastSettlementDate IS NULL AND sh.CreatedOn >= CAST(GETDATE() AS DATE) AND sh.CreatedOn < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+    )`;
+    let cctBizDateFilter = `(
+      (start_date = CAST(GETDATE() AS DATE))
+      OR (start_date IS NULL AND CreatedDate >= CAST(GETDATE() AS DATE) AND CreatedDate < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+    )`;
+    let ptdDateFilter = `(
+      (ptd.start_date = CAST(GETDATE() AS DATE))
+      OR (ptd.start_date IS NULL AND ptd.CreatedDate >= CAST(GETDATE() AS DATE) AND ptd.CreatedDate < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+    )`;
+    let pdcDateFilter = `(
+      (pdc.start_date = CAST(GETDATE() AS DATE))
+      OR (pdc.start_date IS NULL AND pdc.CreatedOn >= CAST(GETDATE() AS DATE) AND pdc.CreatedOn < DATEADD(day, 1, CAST(GETDATE() AS DATE)))
+    )`;
 
     if (fromDate && toDate) {
       const fDate = fromDate.replace(/[^0-9T:.-]/g, '');
       const tDate = toDate.replace(/[^0-9T:.-]/g, '');
-      shDateFilter     = `CAST(COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE), CAST(sh.CreatedOn AS DATE)) AS DATE) BETWEEN CAST('${fDate}' AS DATE) AND CAST('${tDate}' AS DATE)`;
-      cctBizDateFilter = `CAST(COALESCE(start_date, CreatedDate) AS DATE) BETWEEN CAST('${fDate}' AS DATE) AND CAST('${tDate}' AS DATE)`;
-      ptdDateFilter    = `COALESCE(ptd.start_date, CAST(ptd.CreatedDate AS DATE)) BETWEEN CAST('${fDate}' AS DATE) AND CAST('${tDate}' AS DATE)`;
-      pdcDateFilter    = `COALESCE(pdc.start_date, CAST(pdc.CreatedOn AS DATE)) BETWEEN CAST('${fDate}' AS DATE) AND CAST('${tDate}' AS DATE)`;
+      shDateFilter = `(
+        (sh.start_date >= CAST('${fDate}' AS DATE) AND sh.start_date <= CAST('${tDate}' AS DATE))
+        OR (sh.start_date IS NULL AND sh.LastSettlementDate >= CAST('${fDate}' AS DATE) AND sh.LastSettlementDate < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+        OR (sh.start_date IS NULL AND sh.LastSettlementDate IS NULL AND sh.CreatedOn >= CAST('${fDate}' AS DATE) AND sh.CreatedOn < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+      )`;
+      cctBizDateFilter = `(
+        (start_date >= CAST('${fDate}' AS DATE) AND start_date <= CAST('${tDate}' AS DATE))
+        OR (start_date IS NULL AND CreatedDate >= CAST('${fDate}' AS DATE) AND CreatedDate < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+      )`;
+      ptdDateFilter = `(
+        (ptd.start_date >= CAST('${fDate}' AS DATE) AND ptd.start_date <= CAST('${tDate}' AS DATE))
+        OR (ptd.start_date IS NULL AND ptd.CreatedDate >= CAST('${fDate}' AS DATE) AND ptd.CreatedDate < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+      )`;
+      pdcDateFilter = `(
+        (pdc.start_date >= CAST('${fDate}' AS DATE) AND pdc.start_date <= CAST('${tDate}' AS DATE))
+        OR (pdc.start_date IS NULL AND pdc.CreatedOn >= CAST('${fDate}' AS DATE) AND pdc.CreatedOn < DATEADD(day, 1, CAST('${tDate}' AS DATE)))
+      )`;
     }
 
     let userFilter = "";

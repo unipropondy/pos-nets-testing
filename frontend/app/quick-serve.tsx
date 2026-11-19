@@ -672,9 +672,10 @@ export default function QuickServePOSScreen() {
   const [newIsActive, setNewIsActive] = useState<boolean>(true);
   const [addingCustomer, setAddingCustomer] = useState<boolean>(false);
 
-  // YeahPay Terminal Modal State
+  // YeahPay & NETS Terminal Modal State
   const [terminalModalVisible, setTerminalModalVisible] = useState<boolean>(false);
   const [terminalStatus, setTerminalStatus] = useState<"idle" | "processing" | "success" | "cancelled" | "failed">("idle");
+  const [terminalTitle, setTerminalTitle] = useState<string>("Waiting for Terminal Payment");
   const [terminalMessage, setTerminalMessage] = useState<string>("");
 
   // PayNow QR Modal State
@@ -1919,7 +1920,114 @@ export default function QuickServePOSScreen() {
       return;
     }
 
-    // 2. Terminal Payment Flow for YeahPay
+    // 2. Terminal Payment Flow for NETS (NETS CARD & NETS QR)
+    const isNetsQrMode = normMethod === "NETS QR" || normMethod === "NETSQR";
+    const isNetsCardMode = normMethod === "NETS CARD" || normMethod === "NETSCARD" || normMethod === "NETS";
+    const isNets = isNetsQrMode || isNetsCardMode;
+
+    if (isNets) {
+      const endpoint = isNetsQrMode ? "/api/nets/qr-payment" : "/api/nets/card-payment";
+      const promptMsg = isNetsQrMode
+        ? "Presenting QR code on NETS terminal..."
+        : "Please tap, insert NETS card or FlashPay on terminal...";
+      const activeTableId = selectedTable ? String(selectedTable.id || selectedTable.TableId || "") : "";
+
+      setTerminalModalVisible(true);
+      setTerminalStatus("processing");
+      setTerminalTitle("Waiting for NETS Terminal");
+      setTerminalMessage(promptMsg);
+
+      console.log(`🔄 [QuickServe] Calling NETS endpoint: ${endpoint} for: ${selectedPaymentMethod} (isQr: ${isNetsQrMode}, Amount: ${finalTotal})`);
+
+      try {
+        const token = useAuthStore.getState().token;
+        const response = await fetch(`${API_URL}${endpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            amount: finalTotal,
+            ecrRef: `QS_${Date.now()}`,
+            isQr: isNetsQrMode,
+            tableId: activeTableId,
+          }),
+        });
+
+        const result = await response.json();
+        console.log(`✅ [QuickServe] NETS ${isNetsQrMode ? "QR" : "Card"} response:`, result);
+
+        const isCancelled = result.isCancelled || result.status === "cancelled" || result.responseCode === "XX";
+        const isTimeout = result.isTimeout || result.status === "timeout" || result.responseCode === "TO" || result.errorCode === "ETIMEDOUT";
+        const isUnknown = result.isUnknownStatus || result.status === "unknown" || result.errorCode === "ERECONCILIATIONREQUIRED";
+
+        if (result.success && result.approved) {
+          setTerminalStatus("success");
+          setTerminalTitle("Payment Approved!");
+          const approvalMsg = `Payment Successful: $${finalTotal.toFixed(2)} paid via ${selectedPaymentMethod} (Approval: ${result.approvalCode || result.stan || "OK"})`;
+          setTerminalMessage(approvalMsg);
+          toast.showToast({ message: "Payment Successful", subtitle: approvalMsg, type: "success" });
+          setTimeout(() => {
+            setTerminalModalVisible(false);
+            executePaymentFinalize();
+          }, 400);
+          return;
+        } else if (isCancelled) {
+          setTerminalStatus("cancelled");
+          setTerminalTitle("Transaction Cancelled");
+          setTerminalMessage("Transaction Cancelled");
+          toast.showToast({ message: "Transaction Cancelled", subtitle: `${selectedPaymentMethod} was cancelled on terminal`, type: "warning" });
+          setTimeout(() => setTerminalModalVisible(false), 1600);
+          return;
+        } else if (isUnknown) {
+          setTerminalStatus("failed");
+          setTerminalTitle("Transaction Status Unknown");
+          setTerminalMessage("Transaction Status Unknown");
+          toast.showToast({ message: "Transaction Status Unknown", subtitle: "Please check terminal or run FC56 last transaction inquiry", type: "error" });
+          setTimeout(() => setTerminalModalVisible(false), 2500);
+          return;
+        } else if (isTimeout) {
+          setTerminalStatus("failed");
+          setTerminalTitle("Transaction Timed Out");
+          setTerminalMessage("Transaction Timed Out");
+          toast.showToast({ message: "Transaction Timed Out", subtitle: "Terminal did not respond before timeout", type: "error" });
+          setTimeout(() => setTerminalModalVisible(false), 2000);
+          return;
+        } else {
+          setTerminalStatus("failed");
+          setTerminalTitle("Payment Declined");
+          const errMsg = result.error || result.responseDescription || `${selectedPaymentMethod} payment declined`;
+          setTerminalMessage(errMsg);
+          toast.showToast({ message: errMsg, type: "error" });
+          setTimeout(() => setTerminalModalVisible(false), 2000);
+          return;
+        }
+      } catch (netsErr: any) {
+        console.error(`❌ [QuickServe] NETS ${isNetsQrMode ? "QR" : "Card"} error:`, netsErr);
+        const isTimeout = /timed? ?out/i.test(netsErr.message || "") || netsErr.code === "ETIMEDOUT";
+        const isUnknown = /reconciliation|uncertain/i.test(netsErr.message || "");
+
+        setTerminalStatus("failed");
+        if (isUnknown) {
+          setTerminalTitle("Transaction Status Unknown");
+          setTerminalMessage("Transaction Status Unknown");
+          toast.showToast({ message: "Transaction Status Unknown", type: "error" });
+        } else if (isTimeout) {
+          setTerminalTitle("Transaction Timed Out");
+          setTerminalMessage("Transaction Timed Out");
+          toast.showToast({ message: "Transaction Timed Out", type: "error" });
+        } else {
+          setTerminalTitle("Payment Declined");
+          setTerminalMessage(netsErr.message || "Failed to communicate with NETS terminal");
+          toast.showToast({ message: netsErr.message || "Failed to communicate with NETS terminal", type: "error" });
+        }
+        setTimeout(() => setTerminalModalVisible(false), 2000);
+        return;
+      }
+    }
+
+    // 3. Terminal Payment Flow for YeahPay
     if (normMethod.includes("YEAHPAY")) {
       const pmObj = activePaymodes.find(
         (p) => String(p.payMode || p.description || "").toUpperCase().trim() === normMethod
@@ -1993,7 +2101,7 @@ export default function QuickServePOSScreen() {
       }
     }
 
-    // 3. Normal / Direct Checkout Finalization (Cash, Nets, PayNow, FOC, Member, Credit, etc.)
+    // 4. Normal / Direct Checkout Finalization (Cash, PayNow, FOC, Member, Credit, etc.)
     await executePaymentFinalize();
   };
 
@@ -4568,13 +4676,15 @@ export default function QuickServePOSScreen() {
             </View>
 
             <Text style={styles.terminalTitle}>
-              {terminalStatus === "processing"
-                ? "Waiting for Terminal Payment"
-                : terminalStatus === "success"
-                ? "Payment Approved!"
-                : terminalStatus === "cancelled"
-                ? "Payment Cancelled"
-                : "Payment Declined"}
+              {terminalTitle || (
+                terminalStatus === "processing"
+                  ? "Waiting for Terminal Payment"
+                  : terminalStatus === "success"
+                  ? "Payment Approved!"
+                  : terminalStatus === "cancelled"
+                  ? "Transaction Cancelled"
+                  : "Payment Declined"
+              )}
             </Text>
 
             <Text style={styles.terminalSubtitle}>

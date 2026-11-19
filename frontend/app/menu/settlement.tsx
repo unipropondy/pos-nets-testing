@@ -1134,7 +1134,10 @@ export default function SettlementScreen() {
         API.get(`/settlement/day-log?date=${dateStr}`).catch(() => ({
           data: null,
         })),
-        API.get(`/settlement/day-confirmation?date=${dateStr}`).catch(() => ({
+        API.get(
+          `/settlement/day-confirmation?date=${dateStr}`,
+          authHeader,
+        ).catch(() => ({
           data: null,
         })),
         API.get(

@@ -680,7 +680,7 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
                   ...r,
                   status: 'Paid',
                   terminalStatus: 'success',
-                  terminalMsg: `✅ Approved by NETS (Appr: ${netsResult.approvalCode || netsResult.stan || ''})`,
+                  terminalMsg: `Payment Successful (Appr: ${netsResult.approvalCode || netsResult.stan || ''})`,
                   referenceNo: netsResult.approvalCode || netsResult.stan || r.referenceNo,
                 }
               : r
@@ -689,15 +689,28 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
 
         showToast({
           type: 'success',
-          message: `✅ NETS Payment Approved`,
+          message: `Payment Successful`,
           subtitle: `$${amt.toFixed(2)} paid via ${row.payMode}`
         });
       } else {
-        const errMsg = netsResult.error || netsResult.responseDescription || 'Payment declined by NETS';
+        const isCancelled = netsResult.isCancelled || netsResult.status === 'cancelled' || netsResult.responseCode === 'XX';
+        const isTimeout = netsResult.isTimeout || netsResult.status === 'timeout' || netsResult.responseCode === 'TO' || netsResult.errorCode === 'ETIMEDOUT';
+        const isUnknown = netsResult.isUnknownStatus || netsResult.status === 'unknown' || netsResult.errorCode === 'ERECONCILIATIONREQUIRED';
+
+        const errMsg = isCancelled
+          ? 'Transaction Cancelled'
+          : isUnknown
+            ? 'Transaction Status Unknown'
+            : isTimeout
+              ? 'Transaction Timed Out'
+              : (netsResult.error || netsResult.responseDescription || 'Payment declined by NETS');
+
+        const sessionStatus = isCancelled ? 'cancelled' : 'failed';
+
         if (tableId && ongoingSplitSessions[tableId]) {
-          ongoingSplitSessions[tableId].status = "failed";
-          ongoingSplitSessions[tableId].onUpdate?.("failed", errMsg);
-          useTerminalPaymentStore.getState().updateSession(tableId, { status: "failed", message: errMsg });
+          ongoingSplitSessions[tableId].status = sessionStatus;
+          ongoingSplitSessions[tableId].onUpdate?.(sessionStatus, errMsg);
+          useTerminalPaymentStore.getState().updateSession(tableId, { status: sessionStatus, message: errMsg });
           delete ongoingSplitSessions[tableId];
         }
 
@@ -707,14 +720,22 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
               ? {
                   ...r,
                   status: 'Pending',
-                  terminalStatus: 'failed',
-                  terminalMsg: `❌ ${errMsg}`
+                  terminalStatus: sessionStatus,
+                  terminalMsg: errMsg
                 }
               : r
           )
         );
 
-        Alert.alert('❌ NETS Payment Failed', errMsg);
+        const alertTitle = isCancelled
+          ? 'Transaction Cancelled'
+          : isUnknown
+            ? 'Transaction Status Unknown'
+            : isTimeout
+              ? 'Transaction Timed Out'
+              : 'NETS Payment Failed';
+
+        Alert.alert(alertTitle, isCancelled ? `${isQr ? 'NETS QR' : 'NETS Card'} transaction was cancelled on the terminal.` : errMsg);
       }
 
       setIsGeneratingQR(false);

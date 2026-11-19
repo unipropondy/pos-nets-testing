@@ -452,9 +452,29 @@ export function useGlobalSocketSync() {
       UniversalPrinter.processPendingPrintJobs();
     };
 
-    const handleTerminalPaymentSync = (payload: { tableId: string; session: any }) => {
-      const { tableId, session } = payload;
+    const handleTerminalPaymentSync = (payload: any) => {
+      if (!payload) return;
+      const tableId = payload.tableId;
       if (!tableId) return;
+
+      // Handle raw backend payload shape { tableId, status, message, paymentMethod, amount, ... }
+      // as well as frontend session shape { tableId, session }
+      const session = payload.session || {
+        tableId,
+        status: (payload.status === "APPROVED" || payload.status === "approved" || payload.status === "success")
+          ? "success"
+          : (payload.status === "CANCELLED" || payload.status === "cancelled")
+            ? "cancelled"
+            : (payload.status === "TIMEOUT" || payload.status === "timeout" || payload.status === "UNKNOWN" || payload.status === "unknown" || payload.status === "FAILED" || payload.status === "failed")
+              ? "failed"
+              : (payload.status === "WAITING_CARD" || payload.status === "PROCESSING" || payload.status === "processing")
+                ? "processing"
+                : "idle",
+        message: payload.message || "",
+        method: payload.paymentMethod || payload.method || "",
+        total: payload.amount || payload.total || 0,
+      };
+
       if (session) {
         useTerminalPaymentStore.getState().setSession(tableId, session, false);
 

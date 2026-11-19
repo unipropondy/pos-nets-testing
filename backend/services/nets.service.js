@@ -297,18 +297,17 @@ class NetsService {
         }
 
         // BCD Length Header Parsing (First 2 bytes)
+        // Uses protocol fromBcd2 helper for robust BCD decoding across all frame sizes (e.g. 1527 bytes for QR)
         if (expectedTotalLength === null && responseBuffer.length >= 2) {
-          const b1 = responseBuffer[0];
-          const b2 = responseBuffer[1];
-          const bcdStr = b1.toString(16).padStart(2, '0') + b2.toString(16).padStart(2, '0');
-          const bodyAndLrcLen = parseInt(bcdStr, 10);
-          if (!isNaN(bodyAndLrcLen) && bodyAndLrcLen > 0) {
+          const bodyAndLrcLen = fromBcd2(responseBuffer, 0);
+          if (bodyAndLrcLen > 0) {
             expectedTotalLength = bodyAndLrcLen + 2;
             console.log(`[${new Date().toISOString()}] [NETS Socket] BCD header parsed: bodyAndLrcLen=${bodyAndLrcLen}, expectedTotalLength=${expectedTotalLength}`);
           }
         }
 
         // Complete Frame Received
+        // Validate that full frame is present before passing to finishSuccess
         if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
           const completeFrame = responseBuffer.slice(0, expectedTotalLength);
           finishSuccess(completeFrame);

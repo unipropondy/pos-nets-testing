@@ -306,16 +306,27 @@ async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName
       return res.json({
         success: true,
         approved: true,
+        status: 'approved',
         paymentMethod: paymentMethodName,
         ...result,
         rawHex: sanitizeRawHex(result.rawHex),
       });
     } else {
+      const isCancelled = result.responseCode === 'XX';
+      const isTimeout = result.responseCode === 'TO';
+      const syncStatus = isCancelled ? 'CANCELLED' : isTimeout ? 'TIMEOUT' : 'FAILED';
+      const statusType = isCancelled ? 'cancelled' : isTimeout ? 'timeout' : 'declined';
+      const userMessage = isCancelled
+        ? 'Transaction Cancelled'
+        : isTimeout
+          ? 'Transaction Timed Out'
+          : (result.approvalReason || result.responseDescription || `${paymentMethodName} declined by terminal.`);
+
       if (io) {
         io.emit('terminal_payment_sync', {
           tableId,
-          status: 'FAILED',
-          message: result.approvalReason || result.responseDescription || `${paymentMethodName} declined by terminal.`,
+          status: syncStatus,
+          message: userMessage,
           paymentMethod: paymentMethodName,
           amount: parseFloat(amount),
           responseCode: result.responseCode,
@@ -325,19 +336,32 @@ async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName
       return res.status(400).json({
         success: false,
         approved: false,
+        status: statusType,
+        isCancelled,
+        isTimeout,
         paymentMethod: paymentMethodName,
-        error: result.approvalReason || result.responseDescription || `${paymentMethodName} declined (${result.responseCode})`,
+        error: userMessage,
         ...result,
         rawHex: sanitizeRawHex(result.rawHex),
       });
     }
   } catch (err) {
     logComm('ERR', `${title} Failure`, { error: err.message, code: err.code });
+    const isTimeout = Boolean(err.isTimeout || err.code === 'ETIMEDOUT');
+    const isUnknownStatus = Boolean(err.code === 'ERECONCILIATIONREQUIRED' || err.isUncertain);
+    const syncStatus = isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
+    const statusType = isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
+    const userMessage = isUnknownStatus
+      ? 'Transaction Status Unknown'
+      : isTimeout
+        ? 'Transaction Timed Out'
+        : err.message;
+
     if (io) {
       io.emit('terminal_payment_sync', {
         tableId,
-        status: 'FAILED',
-        message: err.message,
+        status: syncStatus,
+        message: userMessage,
         paymentMethod: paymentMethodName,
         amount: parseFloat(amount),
       });
@@ -345,8 +369,11 @@ async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName
     return res.status(500).json({
       success: false,
       approved: false,
+      status: statusType,
+      isTimeout,
+      isUnknownStatus,
       paymentMethod: paymentMethodName,
-      error: err.message,
+      error: userMessage,
       errorCode: err.code || 'EUNKNOWN',
     });
   }
