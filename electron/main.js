@@ -12,6 +12,11 @@ let stationSetupWindow = null;
 let backendProcess = null;
 let isQuitting = false;
 let activeStationConfig = null;
+let backendRestartAttempts = 0;
+const MAX_BACKEND_RESTART_ATTEMPTS = 5;
+let backendRestartTimer = null;
+let backendHealthyResetTimer = null;
+let isRestartingBackend = false;
 
 // 🔒 1. Single Instance Lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -88,8 +93,18 @@ async function performControlledShutdown() {
 
 // 🛑 Kill backend process cleanly
 function killBackend() {
+  if (backendRestartTimer) {
+    clearTimeout(backendRestartTimer);
+    backendRestartTimer = null;
+  }
+  if (backendHealthyResetTimer) {
+    clearTimeout(backendHealthyResetTimer);
+    backendHealthyResetTimer = null;
+  }
   if (backendProcess && backendProcess.pid) {
     try {
+      backendProcess.removeAllListeners('exit');
+      backendProcess.removeAllListeners('close');
       if (process.platform === 'win32') {
         execSync(`taskkill /pid ${backendProcess.pid} /T /F`, { stdio: 'ignore' });
       } else {
@@ -263,13 +278,14 @@ ipcMain.handle('close-setup-window', () => {
   }
 });
 
-// 🚀 Start backend server
+// 🚀 Start backend server with auto-recovery and crash supervision
 function startBackend() {
   return new Promise((resolve) => {
     // First, check if backend is already running (e.g. on port 3000)
     checkBackendHealth('localhost', 3000, (isAlreadyRunning) => {
       if (isAlreadyRunning) {
         console.log('✅ Backend is already running on http://localhost:3000');
+        backendRestartAttempts = 0;
         return resolve();
       }
 
@@ -282,8 +298,16 @@ function startBackend() {
         return;
       }
 
+      // Ensure any dead process reference is cleaned up before spawning
+      if (backendProcess && backendProcess.pid) {
+        try {
+          backendProcess.removeAllListeners('exit');
+          backendProcess.removeAllListeners('close');
+        } catch (_) {}
+      }
+
       const nodeBin = getNodeExecutable();
-      console.log(`🚀 Starting backend with: ${nodeBin} at ${backendDir}`);
+      console.log(`🚀 Starting backend with: ${nodeBin} at ${backendDir} (Attempt ${backendRestartAttempts + 1}/${MAX_BACKEND_RESTART_ATTEMPTS})`);
 
       // Standardized persistent log directory for Smart POS: %ProgramData%\SmartPOS\logs
       const programData = process.env.ProgramData || "C:\\ProgramData";
@@ -315,22 +339,92 @@ function startBackend() {
         try { fs.appendFileSync(backendStartupLog, text); } catch {}
       });
 
-      backendProcess.on('exit', (code) => {
-        if (code !== 0 && code !== null && !isQuitting) {
-          console.error(`Backend process exited with code ${code}`);
-          const lastErr = startupErrors.trim() || `Process exited with code ${code}`;
-          dialog.showErrorBox(
-            'Backend Startup Error',
-            `The UniPro POS backend server failed to start:\n\n${lastErr}`
-          );
-          app.quit();
+      backendProcess.on('exit', (code, signal) => {
+        const exitMsg = `[${new Date().toISOString()}] Backend process exited with code=${code}, signal=${signal}\n`;
+        try { fs.appendFileSync(backendStartupLog, exitMsg); } catch {}
+
+        if (isQuitting) {
+          console.log('🛑 [Backend Supervisor] Process exit during intentional shutdown. Ignoring restart.');
+          return;
         }
+
+        console.error(`⚠️ [Backend Supervisor] Backend process died unexpectedly (code: ${code}, signal: ${signal}).`);
+        handleBackendCrash(startupErrors, code);
       });
 
       // Poll until backend is online (up to 80 attempts = 40 seconds)
-      waitForBackend(80, startupErrors, resolve);
+      waitForBackend(80, startupErrors, () => {
+        console.log('✅ [Backend Supervisor] Backend is online and responsive.');
+        
+        // Start healthy uptime timer: if running smoothly for 30 seconds, reset retry attempts counter
+        if (backendHealthyResetTimer) clearTimeout(backendHealthyResetTimer);
+        backendHealthyResetTimer = setTimeout(() => {
+          if (backendRestartAttempts > 0) {
+            console.log(`🔄 [Backend Supervisor] Backend has been healthy for 30s. Resetting restart counter from ${backendRestartAttempts} to 0.`);
+            backendRestartAttempts = 0;
+          }
+        }, 30000);
+
+        resolve();
+      });
     });
   });
+}
+
+/**
+ * Handles unexpected backend crashes with bounded exponential restart backoff
+ */
+function handleBackendCrash(lastErrors, exitCode) {
+  if (isQuitting || isRestartingBackend) return;
+
+  // Clean up child process
+  if (backendProcess) {
+    try {
+      backendProcess.removeAllListeners('exit');
+      backendProcess.removeAllListeners('close');
+    } catch (_) {}
+    backendProcess = null;
+  }
+
+  isBackendReady = false;
+
+  if (backendRestartAttempts >= MAX_BACKEND_RESTART_ATTEMPTS) {
+    const errorDetails = (lastErrors && lastErrors.trim()) ? lastErrors.trim() : `Process exit code: ${exitCode}`;
+    const fatalMsg = `[${new Date().toISOString()}] FATAL: Backend exceeded max restart attempts (${MAX_BACKEND_RESTART_ATTEMPTS}). Halting.\n`;
+    const programData = process.env.ProgramData || "C:\\ProgramData";
+    const logDir = path.join(programData, "SmartPOS", "logs");
+    try { fs.appendFileSync(path.join(logDir, "backend-startup.log"), fatalMsg); } catch {}
+
+    dialog.showErrorBox(
+      'Smart POS Backend Failure',
+      `The Smart POS backend server encountered repeated fatal errors and could not recover after ${MAX_BACKEND_RESTART_ATTEMPTS} restart attempts.\n\n` +
+      `Exit Code: ${exitCode}\n` +
+      `Details:\n${errorDetails.slice(-600)}\n\n` +
+      `Troubleshooting steps:\n` +
+      `1. Verify that SQL Server (MSSQL$UPS) service is running.\n` +
+      `2. Verify database connection credentials in backend\\.env\n` +
+      `3. Check log files at: ${logDir}\n` +
+      `4. Restart the Smart POS application.`
+    );
+    app.quit();
+    return;
+  }
+
+  backendRestartAttempts++;
+  // Exponential backoff: 2s, 4s, 8s, 16s, max 30s + small jitter
+  const backoffDelay = Math.min(30000, 2000 * Math.pow(2, backendRestartAttempts - 1) + Math.floor(Math.random() * 500));
+  console.warn(`🔄 [Backend Supervisor] Scheduling restart attempt ${backendRestartAttempts}/${MAX_BACKEND_RESTART_ATTEMPTS} in ${(backoffDelay / 1000).toFixed(1)}s...`);
+
+  isRestartingBackend = true;
+  backendRestartTimer = setTimeout(async () => {
+    backendRestartTimer = null;
+    isRestartingBackend = false;
+    try {
+      await startBackend();
+    } catch (err) {
+      console.error('❌ [Backend Supervisor] Error initiating backend restart:', err.message);
+    }
+  }, backoffDelay);
 }
 
 let isBackendReady = false;

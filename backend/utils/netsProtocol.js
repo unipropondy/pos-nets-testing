@@ -273,7 +273,7 @@ function parseNetsFrame(buffer, options = {}) {
 
   while (offset < messageBody.length) {
     if (offset + 4 > messageBody.length) {
-      break;
+      throw new Error(`Incomplete field header at offset ${offset}: remaining length (${messageBody.length - offset} bytes) is less than 4 bytes`);
     }
 
     const code = messageBody.slice(offset, offset + 2).toString('ascii');
@@ -290,8 +290,14 @@ function parseNetsFrame(buffer, options = {}) {
     }
 
     // Expect FS delimiter
-    if (offset < messageBody.length && messageBody[offset] === FS) {
-      offset += 1;
+    if (offset < messageBody.length) {
+      if (messageBody[offset] === FS) {
+        offset += 1;
+      } else {
+        throw new Error(`Field ${code} missing FS (0x1C) delimiter at offset ${offset} (got 0x${messageBody[offset].toString(16).padStart(2, '0')})`);
+      }
+    } else {
+      throw new Error(`Field ${code} truncated before terminating FS delimiter`);
     }
 
     // ASCII string interpretation

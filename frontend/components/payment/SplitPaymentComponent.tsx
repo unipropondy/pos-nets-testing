@@ -133,19 +133,20 @@ const isYeahPayCard = (modeName: string): boolean =>
 const isYeahPayTerminal = (modeName: string): boolean =>
   isYeahPayPayNow(modeName) || isYeahPayCard(modeName);
 
-/** true ONLY for NETS modes */
-const isNetsMode = (modeName: string): boolean => {
+/** true ONLY for NETS CARD */
+const isNetsCardMode = (modeName: string): boolean => {
   const norm = normalizeMode(modeName);
-  return norm === "NETS" || norm === "NETS PURCHASE" || norm === "NETS CARD";
+  return norm === "NETS CARD" || norm === "NETSCARD";
 };
 
+/** true ONLY for NETS QR */
 const isNetsQrMode = (modeName: string): boolean => {
   const norm = normalizeMode(modeName);
   return norm === "NETS QR" || norm === "NETSQR";
 };
 
 const isNetsTerminal = (modeName: string): boolean =>
-  isNetsMode(modeName) || isNetsQrMode(modeName);
+  isNetsCardMode(modeName) || isNetsQrMode(modeName);
 
 /** Modes that trigger a terminal call.
  *  YeahPay modes and NETS modes qualify. */

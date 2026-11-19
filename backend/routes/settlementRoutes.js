@@ -293,12 +293,15 @@ router.get("/active-day", async (req, res) => {
 });
 
 router.get("/users-settlement", async (req, res) => {
+  const reqStart = Date.now();
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
     const { fromDate, toDate } = req.query;
     const pool = getPool();
     const dateStr = fromDate || new Date().toISOString().split('T')[0];
     const endDateStr = toDate || dateStr;
 
+    const t0 = Date.now();
     // 1. Fetch registered users from UserMaster (Admin and Cashier user groups only)
     const usersRes = await pool.request().query(`
       SELECT 
@@ -317,8 +320,10 @@ router.get("/users-settlement", async (req, res) => {
          OR UPPER(LTRIM(RTRIM(ISNULL(u.UserName, '')))) IN ('ADMIN', 'UNIPRO', 'OWNER', 'CASHIER')
       ORDER BY u.UserName ASC
     `);
+    const q1Time = Date.now() - t0;
 
-    // 2. Fetch login-wise sales for date range
+    // 2. Fetch login-wise sales for date range with sargable date filtering
+    const t1 = Date.now();
     const salesRes = await pool.request()
       .input("fromDate", sql.Date, new Date(dateStr))
       .input("toDate", sql.Date, new Date(endDateStr))
@@ -338,7 +343,7 @@ router.get("/users-settlement", async (req, res) => {
             ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 THEN sh.SysAmount ELSE 0 END), 0) AS TotalSales,
             ISNULL(SUM(CASE WHEN sh.IsCancelled = 1 THEN 1 ELSE 0 END), 0) AS CancelledBills
           FROM SettlementHeader sh
-          WHERE COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE)) BETWEEN @fromDate AND @toDate
+          WHERE (sh.start_date BETWEEN @fromDate AND @toDate OR (sh.start_date IS NULL AND sh.LastSettlementDate >= @fromDate AND sh.LastSettlementDate < DATEADD(day, 1, @toDate)))
           GROUP BY sh.CashierId
         ),
         PaymentTotals AS (
@@ -356,7 +361,7 @@ router.get("/users-settlement", async (req, res) => {
             ISNULL(SUM(CASE WHEN ISNULL(sh.IsCancelled, 0) = 0 AND UPPER(ISNULL(sts.PayMode,'')) LIKE 'YEAHPAY%' THEN ISNULL(sts.SysAmount,0) ELSE 0 END), 0) AS YeahPayAmount
           FROM SettlementHeader sh
           LEFT JOIN SettlementTotalSales sts ON sh.SettlementID = sts.SettlementID
-          WHERE COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE)) BETWEEN @fromDate AND @toDate
+          WHERE (sh.start_date BETWEEN @fromDate AND @toDate OR (sh.start_date IS NULL AND sh.LastSettlementDate >= @fromDate AND sh.LastSettlementDate < DATEADD(day, 1, @toDate)))
           GROUP BY sh.CashierId
         ),
         CreditCollections AS (
@@ -366,7 +371,7 @@ router.get("/users-settlement", async (req, res) => {
           FROM CustomerCreditTransactions cct
           WHERE cct.TransactionType = 'PAYMENT'
             AND ISNULL(cct.CustomerType, 'CREDIT') = 'CREDIT'
-            AND CAST(COALESCE(cct.start_date, cct.CreatedDate) AS DATE) BETWEEN @fromDate AND @toDate
+            AND (cct.start_date BETWEEN @fromDate AND @toDate OR (cct.start_date IS NULL AND cct.CreatedDate >= @fromDate AND cct.CreatedDate < DATEADD(day, 1, @toDate)))
           GROUP BY cct.CreatedBy
         )
         SELECT
@@ -397,7 +402,9 @@ router.get("/users-settlement", async (req, res) => {
           OR CAST(cc.CashierIdRaw AS NVARCHAR(50)) = CAST(sh.CashierId AS NVARCHAR(50))
           OR LOWER(LTRIM(RTRIM(cc.CashierIdRaw))) = LOWER(LTRIM(RTRIM(sh.CashierId)))
         )
-        WHERE COALESCE(sh.start_date, CAST(sh.LastSettlementDate AS DATE), CAST(sh.CreatedOn AS DATE)) BETWEEN @fromDate AND @toDate
+        WHERE (sh.start_date BETWEEN @fromDate AND @toDate 
+               OR (sh.start_date IS NULL AND sh.LastSettlementDate >= @fromDate AND sh.LastSettlementDate < DATEADD(day, 1, @toDate))
+               OR (sh.start_date IS NULL AND sh.LastSettlementDate IS NULL AND sh.CreatedOn >= @fromDate AND sh.CreatedOn < DATEADD(day, 1, @toDate)))
           AND ISNULL(sh.IsCancelled, 0) = 0
         GROUP BY
           CAST(sh.CashierId AS NVARCHAR(50)), sh.CashierId,
@@ -405,6 +412,9 @@ router.get("/users-settlement", async (req, res) => {
           p.CashAmount, p.CardAmount, p.PayNowAmount, p.NetsAmount, p.MemberAmount, p.CreditAmount, p.GrabAmount, p.FoodPandaAmount, p.UpiAmount, p.YeahPayAmount,
           cc.CreditCollectedAmount
       `);
+    const q2Time = Date.now() - t1;
+
+    console.log(`⏱️ [users-settlement] range=${dateStr}..${endDateStr} | q1Users=${q1Time}ms | q2Sales=${q2Time}ms | total=${Date.now() - reqStart}ms`);
 
     const salesMap = {};
     (salesRes.recordset || []).forEach(row => {

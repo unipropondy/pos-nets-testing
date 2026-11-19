@@ -98,7 +98,7 @@ class NetsService {
     if (!pool || !pool.connected) {
       try {
         pool = await poolPromise;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     if (!pool || !pool.connected) {
@@ -191,6 +191,7 @@ class NetsService {
       let connectTimer = null;
       let isResolved = false;
       let requestDispatched = false;
+      const startTime = Date.now();
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
@@ -202,11 +203,14 @@ class NetsService {
       const finishSuccess = (buf) => {
         if (isResolved) return;
         isResolved = true;
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] [NETS Socket] RX Frame Complete (${buf.length} bytes, duration=${duration}ms): ${sanitizeRawHex(buf.toString('hex'))}`);
         cleanup();
         try {
           const parsed = parseNetsFrame(buf);
           resolve({ parsed, rawHex: buf.toString('hex') });
         } catch (err) {
+          console.error(`[${new Date().toISOString()}] [NETS Socket] RX Frame Parse Error: ${err.message}`);
           err.isUncertain = requestDispatched;
           err.requestDispatched = requestDispatched;
           reject(err);
@@ -216,6 +220,8 @@ class NetsService {
       const finishError = (err) => {
         if (isResolved) return;
         isResolved = true;
+        const duration = Date.now() - startTime;
+        console.error(`[${new Date().toISOString()}] [NETS Socket] Error (${err.code || 'UNKNOWN'}, duration=${duration}ms, dispatched=${requestDispatched}): ${err.message}`);
         cleanup();
         err.requestDispatched = requestDispatched;
         reject(err);
@@ -245,6 +251,8 @@ class NetsService {
           connectTimer = null;
         }
 
+        console.log(`[${new Date().toISOString()}] [NETS Socket] Connected to terminal at ${terminalIp}:${terminalPort} (took ${Date.now() - startTime}ms)`);
+
         // Keep socket timeout active for stalled responses instead of clearing it to 0
         socket.setTimeout(timeoutMs);
 
@@ -254,9 +262,11 @@ class NetsService {
           if (err) {
             const writeErr = new Error(`Failed to send data to terminal: ${err.message}`);
             writeErr.requestDispatched = false;
+            console.error(`[${new Date().toISOString()}] [NETS Socket] Write failed: ${err.message}`);
             finishError(writeErr);
           } else {
             requestDispatched = true;
+            console.log(`[${new Date().toISOString()}] [NETS Socket] TX Buffer Dispatched (${frameBuffer.length} bytes) to ${terminalIp}:${terminalPort}`);
             if (onProgress) onProgress({ status: 'sent', message: 'Frame dispatched to terminal, awaiting response' });
           }
         });
@@ -267,11 +277,13 @@ class NetsService {
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
         timeoutErr.requestDispatched = requestDispatched;
+        console.warn(`[${new Date().toISOString()}] [NETS Socket] Socket idle timeout fired after ${timeoutMs / 1000}s (requestDispatched=${requestDispatched})`);
         finishError(timeoutErr);
       });
 
       socket.on('data', (chunk) => {
         responseBuffer = Buffer.concat([responseBuffer, chunk]);
+        console.log(`[${new Date().toISOString()}] [NETS Socket] RX chunk received (+${chunk.length} bytes, total=${responseBuffer.length} bytes)`);
 
         // CRITICAL SPEC REQUIREMENT: Section 2.2.2.2 - NAK Handling on Ethernet Mode
         // If terminal is busy, it returns a 1-byte 0x15 (NAK)
@@ -280,6 +292,7 @@ class NetsService {
           nakErr.code = 'ETERMINALBUSY';
           nakErr.isNak = true;
           nakErr.requestDispatched = false;
+          console.warn(`[${new Date().toISOString()}] [NETS Socket] NAK 0x15 received from terminal (Terminal Busy)`);
           return finishError(nakErr);
         }
 
@@ -291,6 +304,7 @@ class NetsService {
           const bodyAndLrcLen = parseInt(bcdStr, 10);
           if (!isNaN(bodyAndLrcLen) && bodyAndLrcLen > 0) {
             expectedTotalLength = bodyAndLrcLen + 2;
+            console.log(`[${new Date().toISOString()}] [NETS Socket] BCD header parsed: bodyAndLrcLen=${bodyAndLrcLen}, expectedTotalLength=${expectedTotalLength}`);
           }
         }
 
@@ -305,10 +319,12 @@ class NetsService {
         const sockErr = new Error(`NETS Terminal socket error: ${err.message}`);
         sockErr.code = err.code || 'ESOCKET';
         sockErr.requestDispatched = requestDispatched;
+        console.error(`[${new Date().toISOString()}] [NETS Socket] Socket error event: ${err.message} (code=${sockErr.code})`);
         finishError(sockErr);
       });
 
-      socket.on('close', () => {
+      socket.on('close', (hadError) => {
+        console.log(`[${new Date().toISOString()}] [NETS Socket] Socket closed event: hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}`);
         if (!isResolved) {
           if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
             finishSuccess(responseBuffer.slice(0, expectedTotalLength));
@@ -546,29 +562,38 @@ class NetsService {
     }
 
     this.isProcessing = true;
-    const ecn = retrySameEcn || await this.getNextEcnAsync();
-    const amountStr = formatAmount(amount);
-    const cashbackStr = '000000000000';
-    const refNum = (ecrRef || `ECR${Date.now()}`).toString().slice(0, 20);
-    const refCode = (this.config.ecrRefFieldCode || 'HS').toUpperCase().slice(0, 2);
-
-    const fields = [
-      { code: 'T2', value: txnType },
-      { code: '40', value: amountStr },
-      { code: '42', value: cashbackStr },
-      { code: refCode, value: refNum },
-    ];
-
-    const frame = buildNetsFrame({
-      ecn,
-      functionCode: '30',
-      versionCode: '01',
-      fields,
-    });
-
-    console.log(`[NetsService] [${flowName}] Initiating FC 30: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
+    let ecn = null;
+    let amountStr = '';
+    let refNum = '';
 
     try {
+      ecn = retrySameEcn || await this.getNextEcnAsync();
+      amountStr = formatAmount(amount);
+      // Format 13-character Enhanced ECR Reference for Field HD per NETS support requirements
+      const rawRef = (ecrRef || `P${Date.now()}`).toString().trim().replace(/[^a-zA-Z0-9]/g, '');
+      refNum = rawRef.length >= 13 ? rawRef.slice(-13) : rawRef.padStart(13, '0');
+      const refCode = (this.config.ecrRefFieldCode || 'HD').toUpperCase().slice(0, 2);
+
+      // NETS support instruction:
+      // 1. Remove Field 42 (Cash Back Amount) completely from FC 30 request (do not send 0s or empty).
+      // 2. Field HD length must be exactly 13 characters (BCD 0013).
+      // 3. Preserve T2=04 for QR and T2=01 for Card.
+      const fields = [
+        { code: 'T2', value: txnType },
+        { code: '40', value: amountStr },
+        { code: refCode, value: refNum },
+      ];
+
+      const frame = buildNetsFrame({
+        ecn,
+        functionCode: '30',
+        versionCode: '01',
+        fields,
+      });
+
+      console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Frame Dispatched: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
+      console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
+
       const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress);
       this.isProcessing = false;
 
@@ -601,7 +626,7 @@ class NetsService {
       return result;
     } catch (err) {
       this.isProcessing = false;
-      console.error(`[NetsService] [${flowName}] Purchase error ECN=${ecn}:`, err.message);
+      console.error(`[${new Date().toISOString()}] [NetsService] [${flowName}] Purchase error ECN=${ecn}: ${err.message}`);
 
       // Handle NAK (Terminal Busy)
       // Section 2.2.2.2: Do NOT retry financial payments blindly! Terminal is busy with another customer.
@@ -615,7 +640,7 @@ class NetsService {
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
       if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        console.warn(`[NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
+        console.warn(`[${new Date().toISOString()}] [NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
         try {
           const inquiry = await this.getLastApprovedTransaction();
 
@@ -759,7 +784,7 @@ class NetsService {
    *
    * @param {Function} onStepProgress - Callback(stepIndex, stepName, status, message)
    */
-  async runEndOfDaySequence(onStepProgress = () => {}) {
+  async runEndOfDaySequence(onStepProgress = () => { }) {
     const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const results = [];
 

@@ -758,26 +758,17 @@ export default function GeneralSettingsScreen() {
         >
           <Ionicons name="arrow-back" size={24} color={Theme.textPrimary} />
         </TouchableOpacity>
-        <View style={styles.headerLeft}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Ionicons name="settings" size={22} color={Theme.primary} />
-            <Text style={styles.headerTitle}>General Settings</Text>
-          </View>
+        <View style={styles.headerCenter}>
+          <Ionicons name="settings" size={22} color={Theme.primary} />
+          <Text style={styles.headerTitle}>General Settings</Text>
         </View>
         <TouchableOpacity
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            backgroundColor: "#0284c7",
-            paddingHorizontal: 12,
-            paddingVertical: 6,
-            borderRadius: 8,
-            gap: 6,
-          }}
+          style={styles.netsAdminBtn}
           onPress={() => router.push("/nets-admin" as any)}
+          activeOpacity={0.8}
         >
           <Ionicons name="card-outline" size={16} color="#FFF" />
-          <Text style={{ color: "#FFF", fontSize: 13, fontFamily: Fonts.bold }}>NETS Admin</Text>
+          <Text style={styles.netsAdminText}>NETS Admin</Text>
         </TouchableOpacity>
       </View>
 
@@ -1082,6 +1073,34 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+  },
+  headerCenter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  netsAdminBtn: {
+    position: "absolute",
+    right: 24,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#0284c7",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    gap: 6,
+    zIndex: 10,
+    shadowColor: "#0284c7",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  netsAdminText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontFamily: Fonts.bold,
   },
   backBtn: {
     position: "absolute",

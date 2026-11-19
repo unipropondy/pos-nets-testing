@@ -117,13 +117,13 @@ async function runTests() {
 
       const res = await netsService.purchase({
         amount: 5.0,
-        ecrRef: 'POS_1794908065348'
+        ecrRef: 'POS1794908065'
       });
 
       assert.strictEqual(res.isApproved, true);
       assert.strictEqual(res.approvalCode, '123456');
       assert.strictEqual(res.responseCode, '00');
-      assert.strictEqual(res.ecrRef, 'POS_1794908065348');
+      assert.strictEqual(res.ecrRef, 'POS1794908065');
     });
 
     // ----------------------------------------------------
@@ -240,7 +240,7 @@ async function runTests() {
             responseCode: '00',
             fields: [
               { code: '01', value: 'RECOV1' },
-              { code: 'HS', value: 'POS_RECOV_001' },
+              { code: 'HD', value: 'POSRECOV00001' },
               { code: '40', value: '000000000500' },
               { code: '65', value: '999888' },
             ]
@@ -252,13 +252,13 @@ async function runTests() {
 
       const res = await netsService.purchase({
         amount: 5.0,
-        ecrRef: 'POS_RECOV_001'
+        ecrRef: 'POSRECOV00001'
       });
 
       assert.strictEqual(res.isApproved, true);
       assert.strictEqual(res.recovered, true);
       assert.strictEqual(res.approvalCode, 'RECOV1');
-      assert.strictEqual(res.ecrRef, 'POS_RECOV_001');
+      assert.strictEqual(res.ecrRef, 'POSRECOV00001');
     });
 
     // ----------------------------------------------------
@@ -278,7 +278,7 @@ async function runTests() {
             responseCode: '00',
             fields: [
               { code: '01', value: 'RECOV_TIMEOUT' },
-              { code: 'HS', value: 'POS_TIMEOUT_002' },
+              { code: 'HD', value: 'POSTIMEOUT001' },
               { code: '40', value: '000000000500' },
             ]
           });
@@ -289,7 +289,7 @@ async function runTests() {
 
       const res = await netsService.purchase({
         amount: 5.0,
-        ecrRef: 'POS_TIMEOUT_002'
+        ecrRef: 'POSTIMEOUT001'
       });
 
       assert.strictEqual(res.isApproved, true);
@@ -405,6 +405,8 @@ async function runTests() {
     // ----------------------------------------------------
     await test('ECR Reference Field Code Priority defaults to HS for DBS UAT', async () => {
       let sentFrame = null;
+      const prevRefCode = netsService.config.ecrRefFieldCode;
+      netsService.config.ecrRefFieldCode = 'HS';
       mockServer.setHandler((socket, buffer, clearBuf) => {
         sentFrame = buffer;
         const resFrame = buildNetsFrame({
@@ -422,15 +424,19 @@ async function runTests() {
         clearBuf();
       });
 
-      await netsService.purchase({
-        amount: 5.0,
-        ecrRef: 'POS_HS_TEST'
-      });
+      try {
+        await netsService.purchase({
+          amount: 5.0,
+          ecrRef: 'POS1794908065'
+        });
 
-      assert(sentFrame !== null);
-      const parsedSent = parseNetsFrame(sentFrame);
-      assert.strictEqual(parsedSent.fields['HS'], 'POS_HS_TEST');
-      assert.strictEqual(parsedSent.fields['HD'], undefined);
+        assert(sentFrame !== null);
+        const parsedSent = parseNetsFrame(sentFrame);
+        assert.strictEqual(parsedSent.fields['HS'], 'POS1794908065');
+        assert.strictEqual(parsedSent.fields['HD'], undefined);
+      } finally {
+        netsService.config.ecrRefFieldCode = prevRefCode;
+      }
     });
 
     // ----------------------------------------------------
@@ -581,6 +587,78 @@ async function runTests() {
       assert.strictEqual(res.isApproved, false);
       assert.strictEqual(res.paymentType, 'NETS QR');
       assert.strictEqual(res.responseCode, '91');
+    });
+
+    // ----------------------------------------------------
+    // Scenario 16: NETS Support Specific FC30 QR Wire Verification (No Field 42, HD Length = 0013, Exactly 13 Chars)
+    // ----------------------------------------------------
+    await test('NETS Support FC30 QR Wire Validation (No Field 42, HD Length = 0013, Exactly 13 Chars, T2=04)', async () => {
+      let capturedWireBuffer = null;
+      mockServer.setHandler((socket, buffer, clearBuf) => {
+        capturedWireBuffer = Buffer.from(buffer);
+        const resFrame = buildNetsFrame({
+          ecn: '000000009616',
+          functionCode: '30',
+          responseCode: '00',
+          fields: [
+            { code: '01', value: 'NETS01' },
+            { code: 'HC', value: '00' },
+            { code: 'HD', value: 'POS1794996057' },
+            { code: '40', value: '000000002500' },
+          ]
+        });
+        socket.write(resFrame);
+        clearBuf();
+      });
+
+      const res = await netsService.purchaseQr({
+        amount: 25.0,
+        ecrRef: 'POS1794996057' // 13 chars
+      });
+
+      assert(capturedWireBuffer !== null, 'Wire buffer must be captured');
+      console.log('\n--- NETS SUPPORT VERIFICATION DUMP ---');
+      console.log('TX Wire Buffer Length :', capturedWireBuffer.length, 'bytes');
+      console.log('TX Raw Hex            :', capturedWireBuffer.toString('hex').toUpperCase());
+
+      // 1. Verify Length header
+      const bcdLength = (capturedWireBuffer[0] << 8) | capturedWireBuffer[1];
+      const actualBodyAndLrc = capturedWireBuffer.length - 2;
+      assert.strictEqual(actualBodyAndLrc, 61, 'Wire length must be 63 total (61 BCD length)');
+      assert.strictEqual(bcdLength, 0x0061, 'BCD length indicator must be 0x0061');
+
+      // 2. Verify LRC
+      const wireBody = capturedWireBuffer.slice(2, capturedWireBuffer.length - 1);
+      const wireLrc = capturedWireBuffer[capturedWireBuffer.length - 1];
+      const expectedLrc = calculateLrc(wireBody);
+      assert.strictEqual(wireLrc, expectedLrc, `LRC must match XOR calculation (got 0x${wireLrc.toString(16)}, expected 0x${expectedLrc.toString(16)})`);
+
+      // 3. Verify parse
+      const parsed = parseNetsFrame(capturedWireBuffer);
+      console.log('Parsed Fields         :', JSON.stringify(parsed.fields));
+      assert.strictEqual(parsed.functionCode, '30', 'Function Code must be 30');
+      assert.strictEqual(parsed.fields['T2'], '04', 'T2 must be 04 for QR');
+      assert.strictEqual(parsed.fields['40'], '000000002500', 'Field 40 must be 12-digit zero-padded amount');
+      assert.strictEqual(parsed.fields['42'], undefined, 'CRITICAL: Field 42 (Cash Back) must NOT be present in request frame');
+      assert(parsed.fields['HD'] !== undefined, 'Field HD must be present');
+      assert.strictEqual(parsed.fields['HD'].length, 13, 'Field HD value must be exactly 13 characters');
+
+      // 4. Raw byte inspection for Field HD length indicator
+      // Field HD is code 'HD' (0x48, 0x44) followed by 2-byte BCD length: 0x00, 0x13
+      const hdIndex = capturedWireBuffer.indexOf(Buffer.from('HD', 'ascii'));
+      assert(hdIndex !== -1, 'HD field must be present in raw bytes');
+      const hdLenB1 = capturedWireBuffer[hdIndex + 2];
+      const hdLenB2 = capturedWireBuffer[hdIndex + 3];
+      assert.strictEqual(hdLenB1, 0x00, 'HD Length byte 1 must be 0x00');
+      assert.strictEqual(hdLenB2, 0x13, 'HD Length byte 2 must be 0x13 (BCD 0013)');
+      const hdValue = capturedWireBuffer.slice(hdIndex + 4, hdIndex + 4 + 13).toString('ascii');
+      assert.strictEqual(hdValue, 'POS1794996057', 'HD Value in wire must match 13 chars');
+      assert.strictEqual(capturedWireBuffer[hdIndex + 4 + 13], 0x1c, 'HD must be terminated by FS (0x1C)');
+
+      // 5. Raw byte inspection confirming NO '42' field exists
+      const field42Index = capturedWireBuffer.indexOf(Buffer.from('42', 'ascii'));
+      assert.strictEqual(field42Index, -1, 'Raw buffer must NOT contain Field 42');
+      console.log('--- END OF NETS SUPPORT VERIFICATION DUMP ---\n');
     });
 
   } finally {

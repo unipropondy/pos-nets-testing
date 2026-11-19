@@ -1057,7 +1057,7 @@ async function syncTableStatus(req, tableId) {
     WHERE TableNumber = @tid OR (TRY_CAST(@tid AS UNIQUEIDENTIFIER) IS NOT NULL AND TableId = TRY_CAST(@tid AS UNIQUEIDENTIFIER));
 
     SELECT 
-      TableId, Status, entry_status AS entryStatus, PAYMENT_STATUS AS paymentStatus, TotalAmount, CONVERT(VARCHAR, StartTime, 126) AS StartTime, 
+      TableId, Status, entry_status AS entryStatus, PAYMENT_STATUS AS paymentStatus, TotalAmount, ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, StartTime), 126), StartTime) AS StartTime, 
       CurrentOrderId, TableNumber as tableNo, DiningSection as section, CustomerName as customerName, Pax as pax,
       CASE 
         WHEN Status IN (1, 2, 3) AND StartTime IS NOT NULL AND DATEDIFF(MINUTE, StartTime, GETDATE()) >= 60 THEN 1 

@@ -516,7 +516,7 @@ export default function CartScreen() {
             if (officialOrderId) {
               useCartStore.getState().setTableOrderId(tableId, officialOrderId);
               useActiveOrdersStore.getState().updateOrderId(targetOrderId || "NEW", officialOrderId);
-              updateTableStatus(tableId, context.section!, context.tableNo!, officialOrderId, 'SENT', sendRes.StartTime || new Date().toISOString(), undefined, payableAmount);
+              updateTableStatus(tableId, context.section!, context.tableNo!, officialOrderId, 'SENT', sendRes.StartTime, undefined, payableAmount);
               socket.emit("new_order", { orderId: officialOrderId, context, items: cart, createdAt: Date.now() });
               showToast({ type: "success", message: "Order Sent", subtitle: `Kitchen notified. Order #${officialOrderId}`, duration: 800 });
               const targetSec = context?.section || "SECTION_1";

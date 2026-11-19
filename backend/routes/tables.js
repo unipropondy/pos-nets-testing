@@ -69,7 +69,7 @@ router.get("/all", async (req, res) => {
     let query = `
       SELECT TableId AS id, CAST(TableNumber AS VARCHAR(50)) AS label,
       CAST(DiningSection AS VARCHAR(10)) AS DiningSection, LockedByName as lockedByName,
-      Status, CONVERT(VARCHAR, StartTime, 126) as StartTime, ISNULL(TotalAmount, 0) as totalAmount, CurrentOrderId as currentOrderId,
+      Status, ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, StartTime), 126), StartTime) as StartTime, ISNULL(TotalAmount, 0) as totalAmount, CurrentOrderId as currentOrderId,
       entry_status AS entryStatus, ISNULL(PAYMENT_STATUS, 0) AS paymentStatus, CustomerName as customerName, Pax as pax,
       TableType, Seats, XSize, YSize, XPos, YPos, SortCode,
       CASE 
@@ -276,7 +276,7 @@ router.post("/save-guest", async (req, res) => {
         INSERTED.DiningSection, 
         INSERTED.Status,
         INSERTED.TotalAmount,
-        CONVERT(VARCHAR, INSERTED.StartTime, 126) AS StartTime,
+        ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, INSERTED.StartTime), 126), INSERTED.StartTime) AS StartTime,
         CONVERT(VARCHAR, INSERTED.ModifiedOn, 126) AS ModifiedOn,
         INSERTED.entry_status AS entryStatus
       INTO @temp
@@ -523,7 +523,7 @@ router.put("/status", async (req, res) => {
           ModifiedOn = GETDATE()
       OUTPUT 
         INSERTED.TotalAmount, 
-        CONVERT(VARCHAR, INSERTED.StartTime, 126) AS StartTime,
+        ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, INSERTED.StartTime), 126), INSERTED.StartTime) AS StartTime,
         INSERTED.TableNumber,
         INSERTED.DiningSection,
         INSERTED.entry_status AS entryStatus,
@@ -728,7 +728,7 @@ router.get("/:tableId", async (req, res) => {
           TableNumber AS label,
           DiningSection, 
           Status, 
-          CONVERT(VARCHAR, StartTime, 126) as StartTime, 
+          ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, StartTime), 126), StartTime) as StartTime, 
           ISNULL(TotalAmount, 0) as totalAmount, 
           CurrentOrderId as currentOrderId,
           LockedByName as lockedByName,

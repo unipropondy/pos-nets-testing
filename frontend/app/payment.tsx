@@ -1567,10 +1567,10 @@ export default function PaymentScreen() {
     const isYeahPayCardMode = _methodNorm === "YEAHPAY CARD";
     const isYeahPay        = isYeahPayPayNow || isYeahPayCardMode;
 
-    const isNetsGeneric    = _methodNorm === "NETS" || _methodNorm === "NETS PURCHASE";
+    // Exact matching for NETS terminal modes: ONLY "NETS CARD" and "NETS QR"
     const isNetsQrMode     = _methodNorm === "NETS QR" || _methodNorm === "NETSQR";
-    const isNetsCardMode   = _methodNorm === "NETS CARD" || isNetsGeneric;
-    const isNets           = isNetsGeneric || isNetsQrMode || isNetsCardMode;
+    const isNetsCardMode   = _methodNorm === "NETS CARD" || _methodNorm === "NETSCARD";
+    const isNets           = isNetsQrMode || isNetsCardMode;
 
     // ==========================================
     // 💳 NETS ECR II DIRECT TERMINAL CALL (SEPARATE FLOWS)
@@ -2095,7 +2095,7 @@ export default function PaymentScreen() {
           // Terminal integrations: payment was already called directly, mark as pre-processed
           const _mNorm = method.trim().toUpperCase();
           const _isYeahPayFinal = _mNorm === "YEAHPAY PAYNOW" || _mNorm === "YEAHPAY CARD";
-          const _isNetsFinal = _mNorm === "NETS" || _mNorm === "NETS CARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR";
+          const _isNetsFinal = _mNorm === "NETS CARD" || _mNorm === "NETSCARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR";
           finalPayments.push({
             payModeId,
             payMode: method,
@@ -3321,7 +3321,7 @@ export default function PaymentScreen() {
                           const isSelected = method === m.payMode;
                           const mUpper = pmNormalize(m.payMode);
                           const isNetsQr = mUpper === "NETS QR" || mUpper === "NETSQR";
-                          const isNetsCard = mUpper === "NETS CARD" || mUpper === "NETS" || mUpper === "NETS PURCHASE";
+                          const isNetsCard = mUpper === "NETS CARD" || mUpper === "NETSCARD";
                           const subtitle = isNetsQr
                             ? "Scan to Pay"
                             : isNetsCard

@@ -2169,7 +2169,8 @@ export default function Category() {
               t.TableType === uniqueTables[i].TableType &&
               t.Status === uniqueTables[i].Status &&
               t.Seats === uniqueTables[i].Seats &&
-              t.totalAmount === uniqueTables[i].totalAmount
+              t.totalAmount === uniqueTables[i].totalAmount &&
+              t.StartTime === uniqueTables[i].StartTime
           );
           return isSame ? prev : uniqueTables;
         });

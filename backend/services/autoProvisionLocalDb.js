@@ -89,27 +89,35 @@ async function ensureLocalDatabaseExists() {
   }
 }
 
+let isReplicationInProgress = false;
+
 // Step 2: Sync full schema and tables from Remote DB -> Local DB
 async function syncSchemaFromRemoteToLocal(localPoolOverride) {
-  let remotePool = getRemotePool();
-  if (!isRemoteOnline()) {
-    remotePool = await connectRemote();
-  }
-
-  if (!remotePool || !isRemoteOnline()) {
-    console.log("🟡 [Auto-Provision] Remote DB is offline. Skipping remote schema replication.");
+  if (isReplicationInProgress) {
+    console.log("ℹ️ [Auto-Provision] Schema replication is already in progress. Skipping duplicate execution.");
     return false;
   }
-
-  const localPool = localPoolOverride || getPool();
-  if (!localPool) {
-    console.warn("⚠️ [Auto-Provision] Local DB pool not ready.");
-    return false;
-  }
-
-  console.log("🔄 [Auto-Provision] Fetching remote table schemas from Remote Cloud Database...");
+  isReplicationInProgress = true;
 
   try {
+    let remotePool = getRemotePool();
+    if (!isRemoteOnline()) {
+      remotePool = await connectRemote();
+    }
+
+    if (!remotePool || !isRemoteOnline()) {
+      console.log("🟡 [Auto-Provision] Remote DB is offline. Skipping remote schema replication.");
+      return false;
+    }
+
+    const localPool = localPoolOverride || getPool();
+    if (!localPool) {
+      console.warn("⚠️ [Auto-Provision] Local DB pool not ready.");
+      return false;
+    }
+
+    console.log("🔄 [Auto-Provision] Fetching remote table schemas from Remote Cloud Database...");
+
     // 1. Get all base tables from Remote DB
     const tablesResult = await remotePool.request().query(`
       SELECT TABLE_NAME 
@@ -149,6 +157,8 @@ async function syncSchemaFromRemoteToLocal(localPoolOverride) {
   } catch (err) {
     console.error("❌ [Auto-Provision] Error syncing schema from Remote DB:", err.message);
     return false;
+  } finally {
+    isReplicationInProgress = false;
   }
 }
 

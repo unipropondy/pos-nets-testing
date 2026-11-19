@@ -70,6 +70,34 @@ export function getSingaporeDate(): Date {
   return new Date();
 }
 
+/**
+ * Returns a local Singapore ISO string without 'Z' (e.g. "2026-11-18T19:06:00")
+ * representing the current local wall-clock time.
+ */
+export function getSingaporeLocalIsoString(date: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  // Format parts according to Asia/Singapore timezone
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Singapore',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const y = parts.find((p) => p.type === 'year')?.value;
+  const m = parts.find((p) => p.type === 'month')?.value;
+  const d = parts.find((p) => p.type === 'day')?.value;
+  let h = parts.find((p) => p.type === 'hour')?.value || '00';
+  if (h === '24') h = '00';
+  const min = parts.find((p) => p.type === 'minute')?.value || '00';
+  const sec = parts.find((p) => p.type === 'second')?.value || '00';
+  return `${y}-${m}-${d}T${h}:${min}:${sec}`;
+}
+
 export function getSingaporeTimeTodayRange(): { from: Date; to: Date } {
   const now = new Date();
   

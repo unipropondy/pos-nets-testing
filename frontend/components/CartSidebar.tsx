@@ -39,6 +39,7 @@ import { useOrderContextStore } from "../stores/orderContextStore";
 import { useTableStatusStore } from "../stores/tableStatusStore";
 import { useTerminalStore } from "../stores/terminalStore";
 import { CustomerDisplaySync } from "../utils/CustomerDisplaySync";
+import { getSingaporeLocalIsoString } from "../utils/timezoneHelper";
 
 const EMPTY_ARRAY: any[] = [];
 
@@ -1429,7 +1430,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
           : orderContext.takeawayNo!,
         activeOrder?.orderId || currentTableOrderId || "NEW",
         "BILL_REQUESTED",
-        new Date().toISOString(),
+        getSingaporeLocalIsoString(),
         undefined,
         payableAmount,
       );
@@ -1444,7 +1445,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
         displayOrderId === "#NEW"
       ) {
         const timestamp = new Date().getTime().toString().slice(-6);
-        displayOrderId = `ORD-${new Date().toISOString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
+        displayOrderId = `ORD-${getSingaporeLocalIsoString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
       }
       const currentOrderId = displayOrderId;
       (async () => {
@@ -1577,7 +1578,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
         : orderContext.takeawayNo!,
       targetOrderId || "NEW",
       "SENT",
-      new Date().toISOString(),
+      getSingaporeLocalIsoString(),
       undefined,
       payableAmount,
     );
@@ -2183,7 +2184,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
                                       displayOrderId === "#NEW"
                                     ) {
                                       const timestamp = new Date().getTime().toString().slice(-6);
-                                      displayOrderId = `ORD-${new Date().toISOString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
+                                      displayOrderId = `ORD-${getSingaporeLocalIsoString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
                                     }
                                     const printData = {
                                       id: displayOrderId,
@@ -2345,7 +2346,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
                                       displayOrderId === "#NEW"
                                     ) {
                                       const timestamp = new Date().getTime().toString().slice(-6);
-                                      displayOrderId = `ORD-${new Date().toISOString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
+                                      displayOrderId = `ORD-${getSingaporeLocalIsoString().split("T")[0].replace(/-/g, "")}-${timestamp}`;
                                     }
                                     const printData = {
                                       id: displayOrderId,
@@ -2539,7 +2540,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
                                   : orderContext.takeawayNo!,
                                 officialOrderId,
                                 "SENT",
-                                new Date().toISOString(),
+                                getSingaporeLocalIsoString(),
                                 undefined,
                                 payableAmount,
                               );
@@ -2569,7 +2570,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
                                   : orderContext.takeawayNo!,
                                 officialOrderId,
                                 "SENT",
-                                new Date().toISOString(),
+                                getSingaporeLocalIsoString(),
                                 undefined,
                                 payableAmount,
                               );

@@ -6,7 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as Print from "expo-print";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -1008,6 +1008,10 @@ export default function SettlementScreen() {
     }
   };
 
+  const isFetchingRef = useRef(false);
+  const pendingFetchRef = useRef(false);
+  const activeFetchIdRef = useRef(0);
+
   useEffect(() => {
     if (selectedTerminal) fetchData();
   }, [
@@ -1018,9 +1022,14 @@ export default function SettlementScreen() {
     selectedCashierId,
   ]);
 
-  // Re-fetch every time this screen comes into focus (fixes stale data on navigate)
+  // Re-fetch when screen comes into focus (skip initial mount since useEffect already fetches)
+  const isInitialMountRef = useRef(true);
   useFocusEffect(
     useCallback(() => {
+      if (isInitialMountRef.current) {
+        isInitialMountRef.current = false;
+        return;
+      }
       if (selectedTerminal) fetchData();
     }, [
       selectedTerminal,
@@ -1051,6 +1060,12 @@ export default function SettlementScreen() {
   ]);
 
   const fetchData = async () => {
+    const currentFetchId = ++activeFetchIdRef.current;
+    if (isFetchingRef.current) {
+      pendingFetchRef.current = true;
+      return;
+    }
+    isFetchingRef.current = true;
     try {
       setLoading(true);
 
@@ -1059,71 +1074,79 @@ export default function SettlementScreen() {
         ? getLocalDateStr(selectedEndDate)
         : dateStr;
 
-      const totalRes = await API.get(
-        `/settlement/total-sales/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
-      ).catch(() => ({ data: {} }));
-      const payRes = await API.get(
-        `/settlement/payment/${selectedTerminal}/${selectedCashierId}?fromDate=${dateStr}&toDate=${endDateStr}`,
-      ).catch(() => ({ data: [] }));
-      const transRes = await API.get(
-        `/settlement/transactions/${selectedTerminal}/${selectedCashierId}?fromDate=${dateStr}&toDate=${endDateStr}`,
-      ).catch(() => ({ data: [] }));
-      const salesRes = await API.get(
-        `/settlement/sales-summary/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
-      ).catch(() => ({ data: [] }));
-
       const outId = selectedTerminal === "ALL" ? 1 : selectedTerminal;
-      const openRes = await API.get(
-        `/settlement/opening-cash?outletId=${outId}&date=${dateStr}`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const denomsRes = await API.get(
-        `/settlement/denominations?type=OPEN&date=${dateStr}&screenType=CB`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const closeDenomsRes = await API.get(
-        `/settlement/denominations?type=CLOSE&date=${dateStr}&screenType=CB`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const cashOutRes = await API.get(
-        `/settlement/cash-out/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const cashInRes = await API.get(
-        `/settlement/cash-in/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const cashBoxRes = await API.get(
-        `/settlement/artist-cashbox?fromDate=${dateStr}&toDate=${endDateStr}`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const dayLogRes = await API.get(
-        `/settlement/day-log?date=${dateStr}`,
-      ).catch(() => ({ data: null }));
-      const dayConfirmRes = await API.get(
-        `/settlement/day-confirmation?date=${dateStr}`,
-      ).catch(() => ({ data: null }));
-      const usersSettleRes = await API.get(
-        `/settlement/users-settlement?fromDate=${dateStr}&toDate=${endDateStr}`,
-        {
-          headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
-        },
-      ).catch(() => ({ data: null }));
-      const loginWiseRes = await API.get(
-        `/reports/login-wise-sales?filter=custom&startDate=${dateStr}&endDate=${endDateStr}`,
-      ).catch(() => ({ data: [] }));
+      const authHeader = {
+        headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
+      };
+
+      // Execute queries in parallel for high performance
+      const [
+        totalRes,
+        payRes,
+        transRes,
+        salesRes,
+        openRes,
+        denomsRes,
+        closeDenomsRes,
+        cashOutRes,
+        cashInRes,
+        cashBoxRes,
+        dayLogRes,
+        dayConfirmRes,
+        usersSettleRes,
+      ] = await Promise.all([
+        API.get(
+          `/settlement/total-sales/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
+        ).catch(() => ({ data: {} })),
+        API.get(
+          `/settlement/payment/${selectedTerminal}/${selectedCashierId}?fromDate=${dateStr}&toDate=${endDateStr}`,
+        ).catch(() => ({ data: [] })),
+        API.get(
+          `/settlement/transactions/${selectedTerminal}/${selectedCashierId}?fromDate=${dateStr}&toDate=${endDateStr}`,
+        ).catch(() => ({ data: [] })),
+        API.get(
+          `/settlement/sales-summary/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
+        ).catch(() => ({ data: [] })),
+        API.get(
+          `/settlement/opening-cash?outletId=${outId}&date=${dateStr}`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(
+          `/settlement/denominations?type=OPEN&date=${dateStr}&screenType=CB`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(
+          `/settlement/denominations?type=CLOSE&date=${dateStr}&screenType=CB`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(
+          `/settlement/cash-out/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(
+          `/settlement/cash-in/${selectedTerminal}?fromDate=${dateStr}&toDate=${endDateStr}&userId=${selectedCashierId}`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(
+          `/settlement/artist-cashbox?fromDate=${dateStr}&toDate=${endDateStr}`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+        API.get(`/settlement/day-log?date=${dateStr}`).catch(() => ({
+          data: null,
+        })),
+        API.get(`/settlement/day-confirmation?date=${dateStr}`).catch(() => ({
+          data: null,
+        })),
+        API.get(
+          `/settlement/users-settlement?fromDate=${dateStr}&toDate=${endDateStr}`,
+          authHeader,
+        ).catch(() => ({ data: null })),
+      ]);
+
+      // Stale response guard: only apply updates if this is still the most recent request
+      if (currentFetchId !== activeFetchIdRef.current) {
+        return;
+      }
 
       setTotalSales(totalRes.data || {});
       const payData = payRes.data;
@@ -1162,8 +1185,6 @@ export default function SettlementScreen() {
         usersSettleRes.data.data.length > 0
       ) {
         finalUsers = usersSettleRes.data.data;
-      } else if (Array.isArray(loginWiseRes.data)) {
-        finalUsers = loginWiseRes.data;
       }
       setLoginWiseSales(finalUsers);
 
@@ -1204,6 +1225,11 @@ export default function SettlementScreen() {
       Alert.alert("Error", "Failed to load settlement data.");
     } finally {
       setLoading(false);
+      isFetchingRef.current = false;
+      if (pendingFetchRef.current) {
+        pendingFetchRef.current = false;
+        fetchData();
+      }
     }
   };
 

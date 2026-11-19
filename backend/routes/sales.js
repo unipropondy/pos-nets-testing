@@ -220,6 +220,8 @@ const normalizePayMode = (paymentMethod = "CASH") => {
   if (raw === "GRAB"  || raw === "10") return "GRAB";
   if (raw === "FOODPANDA" || raw === "9") return "FOODPANDA";
   if (raw === "UPI"   || raw === "4" || raw === "GPAY" || raw === "PAYTM" || raw.startsWith("PHONE")) return "UPI";
+  if (raw === "NETS QR" || raw === "NETSQR" || raw === "22") return "NETS QR";
+  if (raw === "NETS CARD" || raw === "NETSCARD" || raw === "21") return "NETS CARD";
   if (raw === "NETS"  || raw === "2") return "NETS";
   if (raw === "MEMBER" || raw === "5") return "MEMBER";
   if (raw === "CREDIT" || raw === "6") return "CREDIT";
@@ -1091,7 +1093,7 @@ router.get("/login-wise-sales", async (req, res) => {
         SELECT CAST(UserId AS NVARCHAR(50)) AS UserId, UserName, FullName, UserCode, UserGroupid FROM UserMaster
       ) u
       LEFT JOIN (
-        SELECT UserGroupId, MAX(UserGroupName) AS UserGroupName
+        SELECT UserGroupId, MAX(UserGroupCode) AS UserGroupCode, MAX(UserGroupName) AS UserGroupName
         FROM UserGroupMaster
         GROUP BY UserGroupId
       ) g ON u.UserGroupid = g.UserGroupId

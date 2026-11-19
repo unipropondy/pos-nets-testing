@@ -343,7 +343,7 @@ async function pollTables() {
           CAST(DiningSection AS VARCHAR(10)) AS DiningSection, 
           LockedByName as lockedByName,
           Status, 
-          CONVERT(VARCHAR, StartTime, 126) as StartTime, 
+          ISNULL(CONVERT(VARCHAR, TRY_CONVERT(DATETIME, StartTime), 126), StartTime) as StartTime, 
           ISNULL(TotalAmount, 0) as totalAmount, 
           CurrentOrderId as currentOrderId,
           entry_status AS entryStatus,
@@ -1235,6 +1235,16 @@ async function performGracefulShutdown(reason = "NORMAL") {
     console.log("🛑 [Shutdown] Active transactions rolled back safely.");
   } catch (err) {
     console.error("⚠️ [Shutdown] Error rolling back transactions:", err.message);
+  }
+
+  // Stop database reconnection supervisors cleanly
+  try {
+    const { stopDatabaseSupervisors } = require("./config/db");
+    if (typeof stopDatabaseSupervisors === "function") {
+      stopDatabaseSupervisors();
+    }
+  } catch (err) {
+    console.error("⚠️ [Shutdown] Error stopping database supervisors:", err.message);
   }
 
   // Close database pools
