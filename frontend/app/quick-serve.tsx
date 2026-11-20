@@ -1920,16 +1920,31 @@ export default function QuickServePOSScreen() {
       return;
     }
 
-    // 2. Terminal Payment Flow for NETS (NETS CARD & NETS QR)
+    // 2. Terminal Payment Flow for NETS (NETS CARD, NETS QR & NETS CREDIT CARD)
     const isNetsQrMode = normMethod === "NETS QR" || normMethod === "NETSQR";
+    const isNetsCreditCardMode = normMethod === "NETS CREDIT CARD" || normMethod === "NETSCREDITCARD" || normMethod === "NETSCREDIT";
     const isNetsCardMode = normMethod === "NETS CARD" || normMethod === "NETSCARD" || normMethod === "NETS";
-    const isNets = isNetsQrMode || isNetsCardMode;
+    const isNets = isNetsQrMode || isNetsCardMode || isNetsCreditCardMode;
 
     if (isNets) {
-      const endpoint = isNetsQrMode ? "/api/nets/qr-payment" : "/api/nets/card-payment";
-      const promptMsg = isNetsQrMode
-        ? "Presenting QR code on NETS terminal..."
-        : "Please tap, insert NETS card or FlashPay on terminal...";
+      const endpoint = isNetsCreditCardMode
+        ? "/api/nets/credit-card-payment"
+        : isNetsQrMode
+          ? "/api/nets/qr-payment"
+          : "/api/nets/card-payment";
+
+      const promptMsg = isNetsCreditCardMode
+        ? "Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal..."
+        : isNetsQrMode
+          ? "Presenting QR code on NETS terminal..."
+          : "Please tap, insert NETS card or FlashPay on terminal...";
+
+      const terminalDisplayName = isNetsCreditCardMode
+        ? "NETS Credit Card"
+        : isNetsQrMode
+          ? "NETS QR"
+          : "NETS Card";
+
       const activeTableId = selectedTable ? String(selectedTable.id || selectedTable.TableId || "") : "";
 
       setTerminalModalVisible(true);
@@ -1937,7 +1952,7 @@ export default function QuickServePOSScreen() {
       setTerminalTitle("Waiting for NETS Terminal");
       setTerminalMessage(promptMsg);
 
-      console.log(`🔄 [QuickServe] Calling NETS endpoint: ${endpoint} for: ${selectedPaymentMethod} (isQr: ${isNetsQrMode}, Amount: ${finalTotal})`);
+      console.log(`🔄 [QuickServe] Calling NETS endpoint: ${endpoint} for: ${selectedPaymentMethod} (isCredit: ${isNetsCreditCardMode}, isQr: ${isNetsQrMode}, Amount: ${finalTotal})`);
 
       try {
         const token = useAuthStore.getState().token;
@@ -1951,12 +1966,13 @@ export default function QuickServePOSScreen() {
             amount: finalTotal,
             ecrRef: `QS_${Date.now()}`,
             isQr: isNetsQrMode,
+            isCreditCard: isNetsCreditCardMode,
             tableId: activeTableId,
           }),
         });
 
         const result = await response.json();
-        console.log(`✅ [QuickServe] NETS ${isNetsQrMode ? "QR" : "Card"} response:`, result);
+        console.log(`✅ [QuickServe] NETS ${terminalDisplayName} response:`, result);
 
         const isCancelled = result.isCancelled || result.status === "cancelled" || result.responseCode === "XX";
         const isTimeout = result.isTimeout || result.status === "timeout" || result.responseCode === "TO" || result.errorCode === "ETIMEDOUT";
@@ -2004,7 +2020,7 @@ export default function QuickServePOSScreen() {
           return;
         }
       } catch (netsErr: any) {
-        console.error(`❌ [QuickServe] NETS ${isNetsQrMode ? "QR" : "Card"} error:`, netsErr);
+        console.error(`❌ [QuickServe] NETS ${terminalDisplayName} error:`, netsErr);
         const isTimeout = /timed? ?out/i.test(netsErr.message || "") || netsErr.code === "ETIMEDOUT";
         const isUnknown = /reconciliation|uncertain/i.test(netsErr.message || "");
 

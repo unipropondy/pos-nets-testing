@@ -145,8 +145,14 @@ const isNetsQrMode = (modeName: string): boolean => {
   return norm === "NETS QR" || norm === "NETSQR";
 };
 
+/** true ONLY for NETS CREDIT CARD */
+const isNetsCreditCardMode = (modeName: string): boolean => {
+  const norm = normalizeMode(modeName);
+  return norm === "NETS CREDIT CARD" || norm === "NETSCREDITCARD" || norm === "NETSCREDIT";
+};
+
 const isNetsTerminal = (modeName: string): boolean =>
-  isNetsCardMode(modeName) || isNetsQrMode(modeName);
+  isNetsCardMode(modeName) || isNetsQrMode(modeName) || isNetsCreditCardMode(modeName);
 
 /** Modes that trigger a terminal call.
  *  YeahPay modes and NETS modes qualify. */
@@ -616,16 +622,30 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
     );
 
     // ==========================================
-    // 💳 NETS CARD / NETS QR SPLIT PAYMENT FLOW (SEPARATE ENDPOINTS)
+    // 💳 NETS CARD / NETS QR / NETS CREDIT CARD SPLIT PAYMENT FLOW (SEPARATE ENDPOINTS)
     // ==========================================
     if (isNetsTerminal(row.payMode)) {
       const isQr = isNetsQrMode(row.payMode);
-      const endpoint = isQr ? '/api/nets/qr-payment' : '/api/nets/card-payment';
-      const promptMsg = isQr
-        ? "Presenting QR on NETS terminal..."
-        : "Please tap/insert card on NETS terminal...";
+      const isCredit = isNetsCreditCardMode(row.payMode);
+      const endpoint = isCredit
+        ? '/api/nets/credit-card-payment'
+        : isQr
+          ? '/api/nets/qr-payment'
+          : '/api/nets/card-payment';
 
-      console.log(`🔄 [SplitPayment] Calling NETS endpoint: ${endpoint} for: ${row.payMode} (isQr: ${isQr}, amount: ${amt})`);
+      const promptMsg = isCredit
+        ? "Please insert, swipe or tap Credit Card on terminal..."
+        : isQr
+          ? "Presenting QR on NETS terminal..."
+          : "Please tap/insert card on NETS terminal...";
+
+      const terminalDisplayName = isCredit
+        ? 'NETS Credit Card'
+        : isQr
+          ? 'NETS QR'
+          : 'NETS Card';
+
+      console.log(`🔄 [SplitPayment] Calling NETS endpoint: ${endpoint} for: ${row.payMode} (isCredit: ${isCredit}, isQr: ${isQr}, amount: ${amt})`);
 
       const context = useOrderContextStore.getState().currentOrder;
       const tableId = context?.tableId?.toString();
@@ -658,12 +678,13 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
           amount: amt,
           ecrRef: `SPLIT_${Date.now()}`,
           isQr: isQr,
+          isCreditCard: isCredit,
           tableId: tableId || '',
         })
       });
 
       const netsResult = await netsResponse.json();
-      console.log(`✅ [SplitPayment] NETS ${isQr ? 'QR' : 'Card'} response:`, netsResult);
+      console.log(`✅ [SplitPayment] NETS ${terminalDisplayName} response:`, netsResult);
 
       if (netsResult.success && netsResult.approved) {
         if (tableId && ongoingSplitSessions[tableId]) {

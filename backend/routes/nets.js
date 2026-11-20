@@ -246,7 +246,7 @@ router.post('/end-of-day', async (req, res) => {
 /**
  * Helper to process and broadcast payment transactions cleanly
  */
-async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName }) {
+async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, title, paymentMethodName }) {
   const { amount, ecrRef, tableId = null } = req.body;
   const io = req.app.get('socketio');
 
@@ -254,14 +254,20 @@ async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName
     return res.status(400).json({ success: false, error: 'Valid amount is required.' });
   }
 
-  logComm('TX', title, { amount, ecrRef, isQr, tableId });
+  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId });
 
   // Broadcast initial terminal payment status
+  const waitingMessage = isCreditCard
+    ? 'Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal...'
+    : isQr
+      ? 'Presenting QR code on terminal...'
+      : 'Please tap, insert card or present mobile device on NETS terminal...';
+
   if (io) {
     io.emit('terminal_payment_sync', {
       tableId,
       status: 'WAITING_CARD',
-      message: isQr ? 'Presenting QR code on terminal...' : 'Please tap, insert card or present mobile device on NETS terminal...',
+      message: waitingMessage,
       paymentMethod: paymentMethodName,
       amount: parseFloat(amount),
       ecrRef,
@@ -282,9 +288,14 @@ async function handlePaymentExecution(req, res, { isQr, title, paymentMethodName
       }
     };
 
-    const result = isQr
-      ? await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, onProgress })
-      : await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, onProgress });
+    let result;
+    if (isCreditCard) {
+      result = await netsService.purchaseCreditCard({ amount: parseFloat(amount), ecrRef, onProgress });
+    } else if (isQr) {
+      result = await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, onProgress });
+    } else {
+      result = await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, onProgress });
+    }
 
     logComm('RX', `${title} Result`, result);
 
@@ -388,7 +399,7 @@ router.post('/card-payment', async (req, res) => {
   return handlePaymentExecution(req, res, {
     isQr: false,
     title: 'NETS Card Purchase (FC 30 T2=01)',
-    paymentMethodName: 'NETS'
+    paymentMethodName: 'NETS CARD'
   });
 });
 
@@ -402,6 +413,20 @@ router.post('/qr-payment', async (req, res) => {
     isQr: true,
     title: 'NETS QR Purchase (FC 30 T2=04)',
     paymentMethodName: 'NETS QR'
+  });
+});
+
+/**
+ * POST /api/nets/credit-card-payment
+ * Dedicated endpoint for NETS Credit Card Sale (Function Code I0)
+ * Section 4.8.1 - Supports Visa, Mastercard, AMEX with automatic BIN processing.
+ */
+router.post('/credit-card-payment', async (req, res) => {
+  return handlePaymentExecution(req, res, {
+    isQr: false,
+    isCreditCard: true,
+    title: 'NETS Credit Card Sale (FC I0)',
+    paymentMethodName: 'NETS CREDIT CARD'
   });
 });
 

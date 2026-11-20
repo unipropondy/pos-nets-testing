@@ -116,6 +116,8 @@ const PAYMODE_ICON_MAP: Record<string, string> = {
   NETS: "credit-card",
   NETSCARD: "credit-card",
   NETSQR: "qrcode",
+  NETSCREDITCARD: "credit-card",
+  NETSCREDIT: "credit-card",
   AMEX: "cc-amex",
   MASTER: "cc-mastercard",
   VISA: "cc-visa",
@@ -1567,25 +1569,39 @@ export default function PaymentScreen() {
     const isYeahPayCardMode = _methodNorm === "YEAHPAY CARD";
     const isYeahPay        = isYeahPayPayNow || isYeahPayCardMode;
 
-    // Exact matching for NETS terminal modes: ONLY "NETS CARD" and "NETS QR"
-    const isNetsQrMode     = _methodNorm === "NETS QR" || _methodNorm === "NETSQR";
-    const isNetsCardMode   = _methodNorm === "NETS CARD" || _methodNorm === "NETSCARD";
-    const isNets           = isNetsQrMode || isNetsCardMode;
+    // Exact matching for NETS terminal modes: "NETS CARD", "NETS QR", and "NETS CREDIT CARD"
+    const isNetsQrMode         = _methodNorm === "NETS QR" || _methodNorm === "NETSQR";
+    const isNetsCardMode       = _methodNorm === "NETS CARD" || _methodNorm === "NETSCARD";
+    const isNetsCreditCardMode = _methodNorm === "NETS CREDIT CARD" || _methodNorm === "NETSCREDITCARD" || _methodNorm === "NETSCREDIT";
+    const isNets               = isNetsQrMode || isNetsCardMode || isNetsCreditCardMode;
 
     // ==========================================
     // 💳 NETS ECR II DIRECT TERMINAL CALL (SEPARATE FLOWS)
     // ==========================================
     if (isNets && total > 0 && cacheKey) {
-      const endpoint = isNetsQrMode ? '/api/nets/qr-payment' : '/api/nets/card-payment';
-      const promptMsg = isNetsQrMode
-        ? "Presenting QR code on NETS terminal..."
-        : "Please tap, insert NETS card or FlashPay on terminal...";
+      const endpoint = isNetsCreditCardMode
+        ? '/api/nets/credit-card-payment'
+        : isNetsQrMode
+          ? '/api/nets/qr-payment'
+          : '/api/nets/card-payment';
+
+      const promptMsg = isNetsCreditCardMode
+        ? "Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal..."
+        : isNetsQrMode
+          ? "Presenting QR code on NETS terminal..."
+          : "Please tap, insert NETS card or FlashPay on terminal...";
+
+      const terminalDisplayName = isNetsCreditCardMode
+        ? 'NETS Credit Card'
+        : isNetsQrMode
+          ? 'NETS QR'
+          : 'NETS Card';
 
       setPaymentStatus("processing");
       setPaymentMessage(promptMsg);
       setProcessing(true);
 
-      console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (isQr: ${isNetsQrMode}, Amount: ${total})`);
+      console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (isCredit: ${isNetsCreditCardMode}, isQr: ${isNetsQrMode}, Amount: ${total})`);
 
       const fetchPromise = (async () => {
         try {
@@ -1599,12 +1615,13 @@ export default function PaymentScreen() {
               amount: total,
               ecrRef: `POS_${Date.now()}`,
               isQr: isNetsQrMode,
+              isCreditCard: isNetsCreditCardMode,
               tableId: context?.tableId || '',
             }),
           });
 
           const result = await response.json();
-          console.log(`✅ [MainPayment] NETS ${isNetsQrMode ? 'QR' : 'Card'} response:`, result);
+          console.log(`✅ [MainPayment] NETS ${terminalDisplayName} response:`, result);
 
           let status: "success" | "cancelled" | "failed" = "failed";
           let message = "";
@@ -1646,7 +1663,7 @@ export default function PaymentScreen() {
           if (status === "success") {
             handleTerminalPaymentSuccess(method, total, message);
           } else if (status === "cancelled") {
-            Alert.alert('Transaction Cancelled', `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} transaction was cancelled on the terminal. You may retry or choose another payment mode.`);
+            Alert.alert('Transaction Cancelled', `${terminalDisplayName} transaction was cancelled on the terminal. You may retry or choose another payment mode.`);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
             }
@@ -1656,7 +1673,7 @@ export default function PaymentScreen() {
               ? 'Transaction Status Unknown'
               : isTimeout
                 ? 'Transaction Timed Out'
-                : `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Payment Failed`;
+                : `${terminalDisplayName} Payment Failed`;
             Alert.alert(alertTitle, message);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
@@ -1665,7 +1682,7 @@ export default function PaymentScreen() {
           }
           return result;
         } catch (error: any) {
-          console.error(`❌ [MainPayment] NETS ${isNetsQrMode ? 'QR' : 'Card'} error:`, error);
+          console.error(`❌ [MainPayment] NETS ${terminalDisplayName} error:`, error);
           const isTimeout = /timed? ?out/i.test(error.message || '') || error.code === 'ETIMEDOUT';
           const isUnknown = /reconciliation|uncertain/i.test(error.message || '');
           const status = "failed";
@@ -1690,7 +1707,7 @@ export default function PaymentScreen() {
             ? 'Transaction Status Unknown'
             : isTimeout
               ? 'Transaction Timed Out'
-              : `${isNetsQrMode ? 'NETS QR' : 'NETS Card'} Payment Failed`;
+              : `${terminalDisplayName} Payment Failed`;
           Alert.alert(alertTitle, message);
           delete ongoingPayments[cacheKey];
           return { success: false, error: message };
@@ -1709,7 +1726,11 @@ export default function PaymentScreen() {
         useTerminalPaymentStore.getState().setSession(context.tableId, {
           tableId: context.tableId,
           status: "processing",
-          message: isNetsQrMode ? "Presenting QR on NETS terminal..." : "Please tap/insert card on NETS terminal...",
+          message: isNetsCreditCardMode
+            ? "Please insert, swipe or tap card on NETS terminal..."
+            : isNetsQrMode
+              ? "Presenting QR on NETS terminal..."
+              : "Please tap/insert card on NETS terminal...",
           method: method,
           total: total,
         });
@@ -2118,7 +2139,7 @@ export default function PaymentScreen() {
           // Terminal integrations: payment was already called directly, mark as pre-processed
           const _mNorm = method.trim().toUpperCase();
           const _isYeahPayFinal = _mNorm === "YEAHPAY PAYNOW" || _mNorm === "YEAHPAY CARD";
-          const _isNetsFinal = _mNorm === "NETS CARD" || _mNorm === "NETSCARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR";
+          const _isNetsFinal = _mNorm === "NETS CARD" || _mNorm === "NETSCARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR" || _mNorm === "NETS CREDIT CARD" || _mNorm === "NETSCREDITCARD" || _mNorm === "NETSCREDIT";
           finalPayments.push({
             payModeId,
             payMode: method,
@@ -3345,8 +3366,11 @@ export default function PaymentScreen() {
                           const mUpper = pmNormalize(m.payMode);
                           const isNetsQr = mUpper === "NETS QR" || mUpper === "NETSQR";
                           const isNetsCard = mUpper === "NETS CARD" || mUpper === "NETSCARD";
+                          const isNetsCreditCard = mUpper === "NETS CREDIT CARD" || mUpper === "NETSCREDITCARD" || mUpper === "NETSCREDIT";
                           const subtitle = isNetsQr
                             ? "Scan to Pay"
+                            : isNetsCreditCard
+                            ? "Visa / Master / AMEX"
                             : isNetsCard
                             ? "Tap / Insert / FlashPay"
                             : null;
@@ -3370,7 +3394,7 @@ export default function PaymentScreen() {
                                 ]}
                               >
                                 <FontAwesome5
-                                  name={isNetsQr ? "qrcode" : isNetsCard ? "credit-card" : m.icon}
+                                  name={isNetsQr ? "qrcode" : (isNetsCard || isNetsCreditCard) ? "credit-card" : m.icon}
                                   size={isMobile ? 15 : 18}
                                   color={
                                     isSelected ? "#fff" :

@@ -706,6 +706,20 @@ async function initDB(pool) {
       END
     `);
 
+    // 12c. Insert dynamic NETS CREDIT CARD Paymode if missing
+    await runQuery("Insert NETS CREDIT CARD Paymode", `
+      IF NOT EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE LTRIM(RTRIM(UPPER(PayMode))) = 'NETS CREDIT CARD' OR LTRIM(RTRIM(UPPER(Description))) = 'NETS CREDIT CARD')
+      BEGIN
+          DECLARE @PosCreditCard DECIMAL(18, 0) = 23;
+          IF EXISTS (SELECT 1 FROM [dbo].[Paymode] WHERE Position = @PosCreditCard)
+          BEGIN
+              SELECT @PosCreditCard = ISNULL(MAX(Position), 22) + 1 FROM [dbo].[Paymode];
+          END;
+          INSERT INTO [dbo].[Paymode] (Position, PayMode, Description, Active, Commission, ServiceCharge, isEntertainment, isVoucher, YeahPayEnabled, CreateDate)
+          VALUES (@PosCreditCard, 'NETS CREDIT CARD', 'NETS CREDIT CARD', 1, 0, 0, 0, 0, 0, GETDATE())
+      END
+    `);
+
     // 13. Create AIChatSessions and AIChatMessages tables
     await runQuery("Create AIChatSessions", `
       IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[AIChatSessions]') AND type in (N'U'))

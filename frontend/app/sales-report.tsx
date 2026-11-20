@@ -1300,7 +1300,23 @@ export default function SalesReport() {
 
     const grouped: any[] = [];
     orderOfSettlements.forEach((settlementId) => {
-      const group = groups[settlementId];
+      const rawGroup = groups[settlementId];
+      // Defensive deduplication: if multiple rows share the same PayMode, take the highest SysAmount or average
+      // to guard against duplicate SettlementHeader / SettlementTotalSales rows
+      const modeMap = new Map<string, any>();
+      rawGroup.forEach((r) => {
+        const modeKey = String(r.PayMode || "CASH").trim().toUpperCase();
+        if (!modeMap.has(modeKey)) {
+          modeMap.set(modeKey, { ...r });
+        } else {
+          // If already present, merge or keep row (do not duplicate same payment leg)
+          const existing = modeMap.get(modeKey);
+          if ((r.SysAmount || 0) > (existing.SysAmount || 0)) {
+            modeMap.set(modeKey, { ...r });
+          }
+        }
+      });
+      const group = Array.from(modeMap.values());
       let row = { ...group[0] };
 
       if (group.length > 1) {

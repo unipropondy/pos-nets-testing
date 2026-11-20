@@ -560,6 +560,179 @@ class NetsService {
   }
 
   /**
+   * Dedicated NETS Credit Card Purchase Flow (FC I0)
+   * Official Specification: Section 4.8.1 - Credit Card Sale (Function Code I0), pages 82-84.
+   * Supports Visa, Mastercard, AMEX with automatic BIN processing (Field 9G omitted).
+   */
+  async purchaseCreditCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    return this._executeCreditCardTransaction({
+      amount,
+      ecrRef,
+      retrySameEcn,
+      onProgress,
+    });
+  }
+
+  /**
+   * Internal dedicated runner for Credit Card Sale (FC I0) with strict isolation and validation
+   * @private
+   */
+  async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    if (this.isProcessing) {
+      throw new Error(`A payment transaction is already in progress on the terminal.`);
+    }
+
+    const flowName = 'NETS Credit Card';
+    this.isProcessing = true;
+    let ecn = null;
+    let amountStr = '';
+    let refNum = '';
+
+    try {
+      ecn = retrySameEcn || await this.getNextEcnAsync();
+      amountStr = formatAmount(amount);
+
+      // Section 4.8.1: Field HD (Enhanced ECR Reference) is 13 ASCII characters
+      const rawRef = (ecrRef || `P${Date.now()}`).toString().trim().replace(/[^a-zA-Z0-9]/g, '');
+      refNum = rawRef.length >= 13 ? rawRef.slice(-13) : rawRef.padStart(13, '0');
+
+      // Section 4.8.1:
+      // Header: ECN (12 ASC) + Function Code 'I0' + Version '01' + RFU '0' + FS
+      // Mandatory Fields:
+      // - Field 40: Transaction Amount (12-char zero-padded amount in cents)
+      // - Field HD: Enhanced ECR Reference Number (13 characters)
+      // Acquirer selection is automatic via BIN routing: Field 9G is omitted. Field 9Q is omitted.
+      const fields = [
+        { code: '40', value: amountStr },
+        { code: 'HD', value: refNum },
+      ];
+
+      const frame = buildNetsFrame({
+        ecn,
+        functionCode: 'I0',
+        versionCode: '01',
+        fields,
+      });
+
+      console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Frame Dispatched: ECN=${ecn}, Amount=${amount} (${amountStr}), Function=I0, Field HD=${refNum}`);
+      console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
+
+      const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+        isQr: false,
+        txnType: 'I0',
+        flowName,
+      });
+      this.isProcessing = false;
+
+      const isApproved = res.parsed.isApproved;
+      const result = {
+        ecn,
+        isApproved,
+        paymentType: flowName,
+        txnType: 'I0',
+        functionCode: 'I0',
+        approvalReason: res.parsed.approvalReason,
+        responseCode: res.parsed.responseCode,
+        hostResponseCode: res.parsed.hostResponseCode,
+        responseDescription: res.parsed.responseDescription,
+        // Credit card response fields per Spec Section 4.8.1
+        approvalCode: res.parsed.approvalCode || res.parsed.fields['01'] || '',
+        stan: res.parsed.fields['65'] || res.parsed.fields['30'] || '',
+        rrn: res.parsed.fields['D3'] || '',
+        merchantId: res.parsed.fields['D1'] || '',
+        terminalId: res.parsed.fields['16'] || '',
+        cardLabel: res.parsed.fields['L7'] || res.parsed.fields['D8'] || res.parsed.fields['D7'] || '',
+        cardIssuer: res.parsed.fields['D7'] || '',
+        cardScheme: res.parsed.fields['D8'] || '',
+        acquirer: res.parsed.fields['9H'] || res.parsed.fields['9G'] || '',
+        cardExpiry: res.parsed.fields['02'] || '',
+        maskedPan: res.parsed.fields['30'] || '',
+        batchNo: res.parsed.fields['50'] || '',
+        invoiceNo: res.parsed.fields['31'] || '',
+        entryMode: res.parsed.fields['9M'] || '',
+        receiptData: res.parsed.fields['RP'] || '',
+        date: res.parsed.fields['03'] || '',
+        time: res.parsed.fields['04'] || '',
+        amount: amount,
+        ecrRef: refNum,
+        fields: res.parsed.fields,
+        rawHex: res.rawHex,
+      };
+
+      this.lastTransaction = result;
+      return result;
+    } catch (err) {
+      this.isProcessing = false;
+      console.error(`[${new Date().toISOString()}] [NetsService] [${flowName}] Purchase error ECN=${ecn}: ${err.message}`);
+
+      if (err.isNak) {
+        throw new Error('Terminal is currently busy. Please wait and try again.');
+      }
+
+      const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
+
+      if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
+        console.warn(`[${new Date().toISOString()}] [NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
+        try {
+          const inquiry = await this.getLastApprovedTransaction();
+
+          const inqRef = inquiry.fields['HS'] || inquiry.fields['HD'] || '';
+          const isRefMatched = inqRef.trim() === refNum.trim();
+
+          const inqAmountStr = inquiry.fields['40'] || '';
+          const isAmountMatched = inqAmountStr === amountStr;
+
+          if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
+            console.log(`[NetsService] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
+            const recoveredResult = {
+              ecn,
+              isApproved: true,
+              recovered: true,
+              paymentType: flowName,
+              txnType: 'I0',
+              functionCode: 'I0',
+              approvalReason: `Approved (Conclusively matched & recovered via FC 56 for ${flowName})`,
+              responseCode: inquiry.responseCode,
+              hostResponseCode: inquiry.parsed.hostResponseCode,
+              responseDescription: `Approved (Recovered via FC 56 Inquiry for ${flowName})`,
+              approvalCode: inquiry.approvalCode,
+              stan: inquiry.fields['65'] || inquiry.fields['30'] || '',
+              rrn: inquiry.fields['D3'] || '',
+              merchantId: inquiry.fields['D1'] || '',
+              terminalId: inquiry.fields['16'] || '',
+              cardLabel: inquiry.fields['L7'] || inquiry.fields['D8'] || inquiry.fields['D7'] || '',
+              cardIssuer: inquiry.fields['D7'] || '',
+              cardScheme: inquiry.fields['D8'] || '',
+              acquirer: inquiry.fields['9H'] || inquiry.fields['9G'] || '',
+              maskedPan: inquiry.fields['30'] || '',
+              receiptData: inquiry.fields['RP'] || '',
+              date: inquiry.fields['03'] || '',
+              time: inquiry.fields['04'] || '',
+              amount: amount,
+              ecrRef: refNum,
+              fields: inquiry.fields,
+              rawHex: inquiry.rawHex,
+            };
+            this.lastTransaction = recoveredResult;
+            return recoveredResult;
+          } else {
+            console.warn(`[NetsService] [${flowName}] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
+            const unconfirmedErr = new Error(`Transaction outcome uncertain for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
+            unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
+            unconfirmedErr.inquiry = inquiry;
+            throw unconfirmedErr;
+          }
+        } catch (inqErr) {
+          console.error(`[NetsService] [${flowName}] FC 56 recovery failed:`, inqErr.message);
+          throw inqErr;
+        }
+      }
+
+      throw err;
+    }
+  }
+
+  /**
    * Internal common runner for FC 30 with strict flow isolation and validation
    * @private
    */
