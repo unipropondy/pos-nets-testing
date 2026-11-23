@@ -529,6 +529,7 @@ class NetsService {
     const maxRetries = this.config.recoveryMaxRetries !== undefined ? this.config.recoveryMaxRetries : 2;
 
     const recoveryAudit = {
+      ecn: originalEcn,
       originalEcn,
       ecrRef: refNum,
       amount,

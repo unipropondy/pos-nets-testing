@@ -283,6 +283,7 @@ function cleanupTestState() {
     const service = new NetsService();
     // Simulate an active unresolved state
     service.saveUnresolvedTransaction({
+      ecn: '000000016663',
       originalEcn: '000000016663',
       ecrRef: 'LOCKED_REF_001',
       amount: 10.00,
@@ -431,7 +432,100 @@ function cleanupTestState() {
     assert.strictEqual(concurrentAttemptBlocked, true, 'Concurrent recovery must be rejected');
   });
 
+  // ---------------------------------------------------------------------------
+  // Test 9: Verify ECN is defined and preserved on disk during recovery exhaustion
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Persisted unresolved lock always contains defined originalEcn and ecn', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+    service.config.recoveryInitialDelayMs = 10;
+    service.config.recoveryRetryDelayMs = 10;
+    service.config.recoveryMaxRetries = 1;
+
+    let ecnCounter = 7000;
+    service.getNextEcnAsync = async () => String(++ecnCounter).padStart(12, '0');
+
+    // Force transport failure on all FC 56 attempts
+    service.sendPacket = async () => {
+      const err = new Error('read ECONNRESET');
+      err.code = 'ECONNRESET';
+      throw err;
+    };
+
+    try {
+      await service._recoverWithLastApproved({
+        originalEcn: '000000016667',
+        refNum: '1795424524883',
+        amount: 5,
+        amountStr: '000000000500',
+        flowName: 'NETS Card',
+        txnType: '01',
+        initialError: { code: 'ECONNRESET' },
+      });
+      assert.fail('Should throw ERECONCILIATIONREQUIRED');
+    } catch (err) {
+      assert.strictEqual(err.code, 'ERECONCILIATIONREQUIRED');
+      assert.strictEqual(err.originalEcn, '000000016667');
+    }
+
+    const persisted = service.getUnresolvedTransaction();
+    assert.ok(persisted, 'Unresolved transaction must be persisted');
+    assert.strictEqual(persisted.ecn, '000000016667', 'ecn property must be defined and match originalEcn');
+    assert.strictEqual(persisted.originalEcn, '000000016667');
+    assert.strictEqual(persisted.ecrRef, '1795424524883');
+    assert.strictEqual(persisted.amount, 5);
+
+    // Verify disk contents directly
+    const onDiskRaw = fs.readFileSync(UNRESOLVED_TEST_PATH, 'utf8');
+    const onDisk = JSON.parse(onDiskRaw);
+    assert.strictEqual(onDisk.ecn, '000000016667');
+    assert.strictEqual(onDisk.originalEcn, '000000016667');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 10: FC 56 Wire Framing Verification per NETS ECR II Specification
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('FC 56 frame byte structure matches NETS ECR II wire specification', async () => {
+    const frame = netsProtocol.buildNetsFrame({
+      ecn: '000000016668',
+      functionCode: '56',
+      versionCode: '01',
+      fields: [],
+    });
+
+    // Wire length: 2 BCD bytes length + 18 bytes header + 1 byte LRC = 21 bytes
+    assert.strictEqual(frame.length, 21, 'FC 56 frame length without fields must be exactly 21 bytes');
+    
+    // BCD Length Header (18 message body bytes + 1 LRC byte = 19 -> 0x00, 0x19)
+    assert.strictEqual(frame[0], 0x00);
+    assert.strictEqual(frame[1], 0x19);
+
+    // ECN (12 ASCII digits)
+    const ecn = frame.slice(2, 14).toString('ascii');
+    assert.strictEqual(ecn, '000000016668');
+
+    // Function Code (2 ASCII digits: 56)
+    const fc = frame.slice(14, 16).toString('ascii');
+    assert.strictEqual(fc, '56');
+
+    // Version Code (2 ASCII digits: 01)
+    const vc = frame.slice(16, 18).toString('ascii');
+    assert.strictEqual(vc, '01');
+
+    // RFU (1 ASCII digit: 0)
+    const rfu = frame.slice(18, 19).toString('ascii');
+    assert.strictEqual(rfu, '0');
+
+    // FS Separator (0x1C)
+    assert.strictEqual(frame[19], 0x1C);
+
+    // LRC (byte 20)
+    const messageBody = frame.slice(2, 20);
+    const expectedLrc = netsProtocol.calculateLrc(messageBody);
+    assert.strictEqual(frame[20], expectedLrc);
+  });
+
   cleanupTestState();
-  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (8/8) ===');
+  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (10/10) ===');
   process.exit(0);
 })();

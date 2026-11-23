@@ -297,9 +297,10 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
   try {
     const onProgress = (prog) => {
       if (io) {
+        const isReconciling = prog.status === 'recovery_wait' || prog.status === 'recovering';
         io.emit('terminal_payment_sync', {
           tableId,
-          status: 'PROCESSING',
+          status: isReconciling ? 'RECONCILING' : 'PROCESSING',
           message: prog.message,
           paymentMethod: paymentMethodName,
           amount: parseFloat(amount),

@@ -7,6 +7,7 @@ import { socket } from "../constants/socket";
 export type TerminalSessionStatus =
   | "idle"
   | "processing"
+  | "reconciling"
   | "success"
   | "cancelled"
   | "failed";
