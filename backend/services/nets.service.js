@@ -572,9 +572,81 @@ class NetsService {
   }
 
   /**
-   * Sleep helper with cancellation safety
-   * @private
+   * POS-013: Pre-purchase terminal & recovery check.
+   * Ensures:
+   * 1. Terminal is not busy with another operation (concurrency guard).
+   * 2. No active background recovery loop is running.
+   * 3. Terminal is reachable and not still performing an active operation (e.g. NAK or busy).
+   * 4. If an unresolved transaction exists, performs an inquiry (FC 56) to check if the previous
+   *    transaction was actually approved on the terminal before allowing the new purchase.
+   *    If it was approved, it reconciles it and archives it.
+   *    If the terminal reports a non-matching transaction or is available, the previous transaction
+   *    remains recorded in netsUnresolved.json as UNKNOWN, but does NOT permanently block the new purchase.
+   * 5. If terminal returns NAK (0x15) or indicates busy, rejects with ETERMINALBUSY.
    */
+  async checkTerminalAvailabilityBeforePurchase(flowName = 'NETS Payment') {
+    if (this.isProcessing) {
+      const err = new Error(`A payment transaction is already in progress on the terminal.`);
+      err.code = 'ETERMINALBUSY';
+      throw err;
+    }
+
+    if (this.isRecoveryInProgress) {
+      const err = new Error(`Terminal recovery is actively in progress. Please wait for recovery to complete.`);
+      err.code = 'ETERMINALBUSY';
+      throw err;
+    }
+
+    if (this.isTmsUpdating) {
+      const err = new Error(`NETS terminal is currently performing TMS update / reboot (${this.tmsStatus.statusText}). Payment commands are temporarily blocked.`);
+      err.code = 'ETERMINALBUSY';
+      throw err;
+    }
+
+    // If there is an unresolved transaction, attempt pre-flight FC 56 reconciliation check
+    if (this.unresolvedTransaction) {
+      const unres = this.unresolvedTransaction;
+      console.log(`[NetsService] [POS-013] Unresolved transaction detected before new ${flowName} (ECN=${unres.ecn}, Ref=${unres.ecrRef}). Performing pre-purchase FC 56 check...`);
+
+      try {
+        const inquiryEcn = await this.getNextEcnAsync();
+        const inquiry = await this.getLastApprovedTransaction(inquiryEcn);
+
+        if (inquiry && inquiry.success && inquiry.parsed) {
+          const inqRef = (inquiry.fields['HD'] || inquiry.fields['HS'] || '').trim();
+          const inqAmountStr = (inquiry.fields['40'] || '').trim();
+          const isRefMatched = inqRef === unres.ecrRef;
+          const isAmountMatched = inqAmountStr === unres.amountStr;
+
+          if (isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
+            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 confirmed previous transaction ECN=${unres.ecn} was APPROVED! Reconciling now.`);
+            this.saveUnresolvedTransaction(null);
+            this.recordAuditHistory({
+              ecn: unres.ecn,
+              originalEcn: unres.originalEcn || unres.ecn,
+              ecrRef: unres.ecrRef,
+              amount: unres.amount,
+              amountStr: unres.amountStr,
+              flowName: unres.flowName,
+              status: 'RECOVERED_APPROVED',
+              reconciledAt: new Date().toISOString(),
+              details: inquiry,
+            });
+          } else {
+            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 showed terminal has different or no record for previous transaction (Terminal inqRef='${inqRef}' vs unres='${unres.ecrRef}'). Previous remains UNKNOWN; allowing new payment.`);
+          }
+        }
+      } catch (inqErr) {
+        if (inqErr.code === 'ETERMINALBUSY' || inqErr.isNak) {
+          console.warn(`[NetsService] [POS-013] Pre-purchase inquiry found terminal busy (NAK): ${inqErr.message}`);
+          const busyErr = new Error('Terminal is currently busy. Please wait and try again.');
+          busyErr.code = 'ETERMINALBUSY';
+          throw busyErr;
+        }
+        console.warn(`[NetsService] [POS-013] Pre-purchase FC 56 inquiry transport notice: ${inqErr.message}. Allowing new transaction if terminal connects.`);
+      }
+    }
+  }
   _delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
@@ -857,18 +929,8 @@ class NetsService {
    * Automatically triggers FC 84 (TMS / CTS Update) upon successful settlement per POS-001.
    */
   async settlement() {
-    if (this.unresolvedTransaction) {
-      const err = new Error(`Cannot perform settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
-      err.code = 'EUNRESOLVED_TRANSACTION';
-      err.unresolved = { ...this.unresolvedTransaction };
-      throw err;
-    }
-    if (this.isProcessing) {
-      throw new Error('A terminal operation is already in progress.');
-    }
-    if (this.isTmsUpdating) {
-      throw new Error(`Terminal is currently rebooting/updating via TMS. Please wait until ready.`);
-    }
+    // POS-013: Terminal Concurrency & Pre-settlement Availability Check
+    await this.checkTerminalAvailabilityBeforePurchase('NETS Settlement');
 
     const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
@@ -1057,12 +1119,8 @@ class NetsService {
    * @param {string} [acquirer="DBS"]
    */
   async creditSettlement(acquirer = 'DBS') {
-    if (this.unresolvedTransaction) {
-      const err = new Error(`Cannot perform credit settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
-      err.code = 'EUNRESOLVED_TRANSACTION';
-      err.unresolved = { ...this.unresolvedTransaction };
-      throw err;
-    }
+    // POS-013: Terminal Concurrency & Pre-settlement Availability Check
+    await this.checkTerminalAvailabilityBeforePurchase('Credit Card Settlement');
     const ecn = await this.getNextEcnAsync();
     // 6-character padded acquirer code as specified
     const acquirerPadded = acquirer.padEnd(6, ' ').slice(0, 6);
@@ -1179,21 +1237,12 @@ class NetsService {
    * @private
    */
   async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
-    if (this.unresolvedTransaction) {
-      const err = new Error(`Cannot initiate NETS Credit Card payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
-      err.code = 'EUNRESOLVED_TRANSACTION';
-      err.unresolved = { ...this.unresolvedTransaction };
-      throw err;
-    }
-    if (this.isProcessing) {
-      throw new Error(`A payment transaction is already in progress on the terminal.`);
-    }
-    if (this.isTmsUpdating) {
-      throw new Error(`NETS terminal is currently performing TMS update / reboot (${this.tmsStatus.statusText}). Payment commands are temporarily blocked.`);
-    }
-
     const flowName = 'NETS Credit Card';
     const txnType = 'I0';
+
+    // POS-013: Terminal Concurrency & Pre-purchase Availability Check
+    await this.checkTerminalAvailabilityBeforePurchase(flowName);
+
     this.isProcessing = true;
     let ecn = null;
     let amountStr = '';
@@ -1331,18 +1380,8 @@ class NetsService {
    * @private
    */
   async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
-    if (this.unresolvedTransaction) {
-      const err = new Error(`Cannot initiate ${flowName} payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
-      err.code = 'EUNRESOLVED_TRANSACTION';
-      err.unresolved = { ...this.unresolvedTransaction };
-      throw err;
-    }
-    if (this.isProcessing) {
-      throw new Error(`A payment transaction is already in progress on the terminal.`);
-    }
-    if (this.isTmsUpdating) {
-      throw new Error(`NETS terminal is currently performing TMS update / reboot (${this.tmsStatus.statusText}). Payment commands are temporarily blocked.`);
-    }
+    // POS-013: Terminal Concurrency & Pre-purchase Availability Check
+    await this.checkTerminalAvailabilityBeforePurchase(flowName);
 
     this.isProcessing = true;
     let ecn = null;

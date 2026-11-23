@@ -1628,6 +1628,7 @@ export default function PaymentScreen() {
 
           const isCancelled = result.isCancelled || result.status === 'cancelled' || result.responseCode === 'XX';
           const isTimeout = result.isTimeout || result.status === 'timeout' || result.responseCode === 'TO' || result.errorCode === 'ETIMEDOUT';
+          const isBusy = response.status === 429 || result.isBusy || result.errorCode === 'ETERMINALBUSY';
           const isConflict = response.status === 409 || result.isConflict || result.errorCode === 'EUNRESOLVED_TRANSACTION';
           const isUnknown = result.isUnknownStatus || result.status === 'unknown' || result.errorCode === 'ERECONCILIATIONREQUIRED';
 
@@ -1637,6 +1638,9 @@ export default function PaymentScreen() {
           } else if (isCancelled) {
             status = "cancelled";
             message = "Transaction Cancelled";
+          } else if (isBusy) {
+            status = "failed";
+            message = result.error || "Terminal Busy: Please wait a moment and try again.";
           } else if (isConflict) {
             status = "failed";
             message = result.error || "Payment Blocked: An unresolved transaction is pending reconciliation.";
@@ -1673,13 +1677,15 @@ export default function PaymentScreen() {
             }
             delete ongoingPayments[cacheKey];
           } else {
-            const alertTitle = isConflict
-              ? 'Payment Blocked'
-              : isUnknown
-                ? 'Transaction Status Unknown'
-                : isTimeout
-                  ? 'Transaction Timed Out'
-                  : `${terminalDisplayName} Payment Failed`;
+            const alertTitle = isBusy
+              ? 'Terminal Busy'
+              : isConflict
+                ? 'Payment Blocked'
+                : isUnknown
+                  ? 'Transaction Status Unknown'
+                  : isTimeout
+                    ? 'Transaction Timed Out'
+                    : `${terminalDisplayName} Payment Failed`;
             Alert.alert(alertTitle, message);
             if (context?.tableId) {
               useTerminalPaymentStore.getState().clearSession(String(context.tableId));
