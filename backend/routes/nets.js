@@ -641,6 +641,18 @@ router.get('/unresolved-transaction', (req, res) => {
 });
 
 /**
+ * GET /api/nets/audit-history
+ * Returns permanent audit history of NETS transactions (including cancelled and reconciled)
+ */
+router.get('/audit-history', (req, res) => {
+  const history = netsService.getAuditHistory();
+  res.json({
+    success: true,
+    history,
+  });
+});
+
+/**
  * POST /api/nets/clear-unresolved-transaction
  * Verified administrative clearing requiring supervisor evidence
  */
