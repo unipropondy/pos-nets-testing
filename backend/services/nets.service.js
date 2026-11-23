@@ -1471,6 +1471,17 @@ class NetsService {
 
       this.lastTransaction = result;
 
+      // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
+      if (isApproved) {
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn || t.ecrRef === refNum);
+        if (unresIdx >= 0) {
+          console.log(`[NetsService] [${flowName}] Approved transaction cleared matching unresolved entry ECN=${unresList[unresIdx].ecn} (Ref=${refNum}).`);
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        }
+      }
+
       // Handle Authoritative Terminal Cancellation (Response Code XX)
       const resEcn = (res.parsed.ecn || '').trim();
       const isCancellation = res.parsed.responseCode === 'XX' && resEcn === ecn;
@@ -1602,6 +1613,17 @@ class NetsService {
       };
 
       this.lastTransaction = result;
+
+      // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
+      if (isApproved) {
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn || t.ecrRef === refNum);
+        if (unresIdx >= 0) {
+          console.log(`[NetsService] [${flowName}] Approved transaction cleared matching unresolved entry ECN=${unresList[unresIdx].ecn} (Ref=${refNum}).`);
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        }
+      }
 
       // Handle Authoritative Terminal Cancellation (Response Code XX)
       const resEcn = (res.parsed.ecn || '').trim();

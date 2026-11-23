@@ -267,30 +267,33 @@ router.post('/end-of-day', async (req, res) => {
  * Helper to process and broadcast payment transactions cleanly
  */
 async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, title, paymentMethodName }) {
-  const { amount, ecrRef, tableId = null } = req.body;
+  const { amount, ecrRef, tableId = null, retrySameEcn = null } = req.body;
   const io = req.app.get('socketio');
 
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
     return res.status(400).json({ success: false, error: 'Valid amount is required.' });
   }
 
-  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId });
+  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId, retrySameEcn });
 
   // Broadcast initial terminal payment status
-  const waitingMessage = isCreditCard
-    ? 'Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal...'
-    : isQr
-      ? 'Presenting QR code on terminal...'
-      : 'Please tap, insert card or present mobile device on NETS terminal...';
+  const waitingMessage = retrySameEcn
+    ? `Recovering transaction (ECN=${retrySameEcn}) from NETS terminal...`
+    : isCreditCard
+      ? 'Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal...'
+      : isQr
+        ? 'Presenting QR code on terminal...'
+        : 'Please tap, insert card or present mobile device on NETS terminal...';
 
   if (io) {
     io.emit('terminal_payment_sync', {
       tableId,
-      status: 'WAITING_CARD',
+      status: retrySameEcn ? 'RECONCILING' : 'WAITING_CARD',
       message: waitingMessage,
       paymentMethod: paymentMethodName,
       amount: parseFloat(amount),
       ecrRef,
+      retrySameEcn,
     });
   }
 
@@ -305,17 +308,18 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
           paymentMethod: paymentMethodName,
           amount: parseFloat(amount),
           ecrRef,
+          retrySameEcn,
         });
       }
     };
 
     let result;
     if (isCreditCard) {
-      result = await netsService.purchaseCreditCard({ amount: parseFloat(amount), ecrRef, onProgress });
+      result = await netsService.purchaseCreditCard({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
     } else if (isQr) {
-      result = await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, onProgress });
+      result = await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
     } else {
-      result = await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, onProgress });
+      result = await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
     }
 
     logComm('RX', `${title} Result`, result);
@@ -596,8 +600,15 @@ router.post('/reconcile-approved-transaction', async (req, res) => {
         });
       }
 
-      // If there was an unresolved lock for this transaction, clear it now that it is reconciled
-      netsService.saveUnresolvedTransaction(null);
+      // If there was an unresolved lock for this transaction, clear only this matching record
+      const unresList = netsService.loadUnresolvedTransactions();
+      const unresIdx = unresList.findIndex(t => t.ecrRef === expectedRef || t.amountStr === amountStr);
+      if (unresIdx >= 0) {
+        unresList.splice(unresIdx, 1);
+        netsService.saveUnresolvedTransactions(unresList);
+      } else {
+        netsService.saveUnresolvedTransaction(null);
+      }
 
       return res.json(reconciledResult);
     } else {
