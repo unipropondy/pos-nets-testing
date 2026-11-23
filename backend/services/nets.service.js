@@ -14,13 +14,16 @@ const {
 
 const CONFIG_FILE_PATH = path.join(__dirname, '../config/netsConfig.json');
 const ECN_FILE_PATH = path.join(__dirname, '../config/netsEcn.json');
+const UNRESOLVED_FILE_PATH = path.join(__dirname, '../config/netsUnresolved.json');
 
 class NetsService {
   constructor() {
     this.config = this.loadConfig();
     this.currentEcn = this.loadEcn();
+    this.unresolvedTransaction = this.loadUnresolvedTransaction();
     this.activeSocket = null;
     this.isProcessing = false;
+    this.isRecoveryInProgress = false;
     this.lastTransaction = null;
     this.ecnLock = false;
 
@@ -65,6 +68,10 @@ class NetsService {
       ecrRefFieldCode: 'HS',       // Mandatory 'HS' per DBS UAT requirement (configurable to 'HD')
       autoRetryWithSameEcn: true,
       lastApprovedQueryOnTimeout: true,
+      // POS-013: Bounded LAN recovery settings
+      recoveryInitialDelayMs: 4000, // 4s wait to allow LAN link restoration and terminal ECR reset
+      recoveryRetryDelayMs: 2000,   // 2s between connection retries
+      recoveryMaxRetries: 2,         // Maximum 2 additional retries (3 attempts total)
     };
   }
 
@@ -104,6 +111,69 @@ class NetsService {
     } catch (err) {
       console.error('[NetsService] Error saving ECN:', err.message);
     }
+  }
+
+  loadUnresolvedTransaction() {
+    try {
+      if (fs.existsSync(UNRESOLVED_FILE_PATH)) {
+        const raw = fs.readFileSync(UNRESOLVED_FILE_PATH, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && data.ecn && data.status === 'UNRESOLVED') {
+          console.warn(`[NetsService] Loaded PERSISTED unresolved transaction lock: ECN=${data.ecn}, ref=${data.ecrRef}, amount=${data.amount}`);
+          return data;
+        }
+      }
+    } catch (err) {
+      console.error('[NetsService] Error loading unresolved transaction:', err.message);
+    }
+    return null;
+  }
+
+  saveUnresolvedTransaction(unresolvedData) {
+    this.unresolvedTransaction = unresolvedData;
+    try {
+      const dir = path.dirname(UNRESOLVED_FILE_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      if (unresolvedData) {
+        fs.writeFileSync(UNRESOLVED_FILE_PATH, JSON.stringify(unresolvedData, null, 2), 'utf8');
+        console.warn(`[NetsService] [POS-013] Unresolved transaction state PERSISTED: ECN=${unresolvedData.ecn}, Ref=${unresolvedData.ecrRef}`);
+      } else if (fs.existsSync(UNRESOLVED_FILE_PATH)) {
+        fs.unlinkSync(UNRESOLVED_FILE_PATH);
+        console.log(`[NetsService] [POS-013] Unresolved transaction state CLEARED from persistence.`);
+      }
+    } catch (err) {
+      console.error('[NetsService] Error persisting unresolved transaction:', err.message);
+    }
+  }
+
+  getUnresolvedTransaction() {
+    return this.unresolvedTransaction ? { ...this.unresolvedTransaction } : null;
+  }
+
+  /**
+   * Verified administrative reconciliation clearing method.
+   * Requires verified reconciliation evidence (e.g. matching terminal slip or confirmed approval code).
+   * Unrestricted / empty clears are strictly forbidden.
+   */
+  clearUnresolvedTransactionWithEvidence(evidence = {}) {
+    if (!this.unresolvedTransaction) {
+      return { success: true, message: 'No active unresolved transaction.' };
+    }
+
+    if (!evidence || (!evidence.approvalCode && !evidence.reconciliationReason && !evidence.supervisorApproval)) {
+      throw new Error('Administrative clearing requires verified reconciliation evidence (approvalCode, reconciliationReason, or supervisorApproval).');
+    }
+
+    const previous = { ...this.unresolvedTransaction };
+    console.log(`[NetsService] [POS-013] Clearing unresolved transaction ECN=${previous.ecn} with evidence:`, evidence);
+    this.saveUnresolvedTransaction(null);
+    return {
+      success: true,
+      message: `Unresolved transaction ECN=${previous.ecn} cleared successfully with evidence.`,
+      clearedTransaction: previous,
+      evidence,
+      clearedAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -398,9 +468,10 @@ class NetsService {
   /**
    * FC 56: Get Last Approved Transaction
    * Used for transaction inquiry and recovery
+   * Allows passing an explicit ECN or generating a fresh atomic ECN
    */
-  async getLastApprovedTransaction() {
-    const ecn = await this.getNextEcnAsync();
+  async getLastApprovedTransaction(explicitEcn = null) {
+    const ecn = explicitEcn || await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
       functionCode: '56',
@@ -420,6 +491,224 @@ class NetsService {
       rawHex: res.rawHex,
       parsed: res.parsed,
     };
+  }
+
+  /**
+   * Sleep helper with cancellation safety
+   * @private
+   */
+  _delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * POS-013: Bounded LAN Recovery and FC 56 Retry Handler
+   * Encapsulates safe recovery with bounded backoff, retry loop for transport errors,
+   * fresh atomic ECNs per attempt, and strict reconciliation matching.
+   *
+   * @private
+   */
+  async _recoverWithLastApproved({
+    originalEcn,
+    refNum,
+    amount,
+    amountStr,
+    flowName,
+    txnType,
+    initialError,
+    onProgress = null,
+  }) {
+    if (this.isRecoveryInProgress) {
+      console.warn(`[NetsService] [POS-013] [${flowName}] Recovery already in progress for ECN=${originalEcn}. Rejecting concurrent recovery loop.`);
+      throw new Error(`Recovery already in progress for this transaction (ECN=${originalEcn}).`);
+    }
+
+    this.isRecoveryInProgress = true;
+    const initialDelay = this.config.recoveryInitialDelayMs !== undefined ? this.config.recoveryInitialDelayMs : 4000;
+    const retryDelay = this.config.recoveryRetryDelayMs !== undefined ? this.config.recoveryRetryDelayMs : 2000;
+    const maxRetries = this.config.recoveryMaxRetries !== undefined ? this.config.recoveryMaxRetries : 2;
+
+    const recoveryAudit = {
+      originalEcn,
+      ecrRef: refNum,
+      amount,
+      amountStr,
+      flowName,
+      txnType,
+      initialErrorCode: initialError?.code || 'UNKNOWN',
+      initialErrorMessage: initialError?.message || '',
+      startedAt: new Date().toISOString(),
+      recoveryAttempts: [],
+      status: 'RECOVERY_IN_PROGRESS',
+    };
+
+    console.warn(`[${new Date().toISOString()}] [NetsService] [POS-013] [${flowName}] Initiating safe LAN recovery for ECN=${originalEcn} (Ref=${refNum}, Amt=${amount}). Waiting ${initialDelay}ms for link stabilization...`);
+
+    if (onProgress) {
+      onProgress({
+        status: 'recovery_wait',
+        message: `Waiting for terminal connection to stabilize (${initialDelay / 1000}s)...`,
+      });
+    }
+
+    // Step 1: Bounded initial wait period to let POS LAN cable reconnect and terminal ECR reset
+    if (initialDelay > 0) {
+      await this._delay(initialDelay);
+    }
+
+    let inquiry = null;
+    let lastInqErr = null;
+    const eligibleErrorCodes = ['ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'ESOCKET'];
+
+    // Step 2: Retry loop (Attempt 1 + up to maxRetries)
+    const totalAttempts = 1 + maxRetries;
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      let recoveryEcn = null;
+      try {
+        recoveryEcn = await this.getNextEcnAsync();
+        console.log(`[NetsService] [POS-013] [${flowName}] FC 56 recovery attempt ${attempt}/${totalAttempts} with fresh ECN=${recoveryEcn}`);
+
+        if (onProgress) {
+          onProgress({
+            status: 'recovering',
+            message: `Querying terminal status (Attempt ${attempt}/${totalAttempts}, ECN=${recoveryEcn})...`,
+          });
+        }
+
+        inquiry = await this.getLastApprovedTransaction(recoveryEcn);
+        recoveryAudit.recoveryAttempts.push({
+          attempt,
+          recoveryEcn,
+          timestamp: new Date().toISOString(),
+          success: true,
+          responseCode: inquiry.responseCode,
+          approvalCode: inquiry.approvalCode,
+        });
+
+        // FC 56 succeeded at transport level
+        break;
+      } catch (inqErr) {
+        lastInqErr = inqErr;
+        const errCode = inqErr.code || (inqErr.message.includes('timed out') ? 'ETIMEDOUT' : 'UNKNOWN');
+        console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 recovery attempt ${attempt}/${totalAttempts} failed: ${inqErr.message} (code=${errCode})`);
+
+        recoveryAudit.recoveryAttempts.push({
+          attempt,
+          recoveryEcn,
+          timestamp: new Date().toISOString(),
+          success: false,
+          errorCode: errCode,
+          errorMessage: inqErr.message,
+        });
+
+        const isEligibleRetry = eligibleErrorCodes.some(c => errCode.includes(c) || inqErr.message.includes(c));
+        if (attempt < totalAttempts && isEligibleRetry) {
+          console.log(`[NetsService] [POS-013] [${flowName}] Retrying FC 56 in ${retryDelay}ms...`);
+          if (retryDelay > 0) await this._delay(retryDelay);
+        } else if (!isEligibleRetry) {
+          console.error(`[NetsService] [POS-013] [${flowName}] Non-transport error encountered. Aborting retries.`);
+          break;
+        }
+      }
+    }
+
+    this.isRecoveryInProgress = false;
+
+    // Step 3: Evaluate Inquiry Outcome
+    if (inquiry) {
+      const inqRef = (inquiry.fields['HS'] || inquiry.fields['HD'] || '').trim();
+      const isRefMatched = inqRef === refNum.trim();
+      const inqAmountStr = (inquiry.fields['40'] || '').trim();
+      const isAmountMatched = inqAmountStr === amountStr;
+
+      // SCENARIO A: Conclusive Approval Match
+      if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
+        console.log(`[NetsService] [POS-013] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
+        // If an unresolved lock existed, clean it up since transaction is confirmed approved
+        this.saveUnresolvedTransaction(null);
+
+        const recoveredResult = {
+          ecn: originalEcn,
+          recoveryEcn: inquiry.ecn,
+          recoveryAttempts: recoveryAudit.recoveryAttempts,
+          isApproved: true,
+          recovered: true,
+          paymentType: flowName,
+          txnType,
+          functionCode: txnType === 'I0' ? 'I0' : '30',
+          approvalReason: `Approved (Conclusively matched & recovered via FC 56 for ${flowName})`,
+          responseCode: inquiry.responseCode,
+          hostResponseCode: inquiry.parsed.hostResponseCode,
+          responseDescription: `Approved (Recovered via FC 56 Inquiry for ${flowName})`,
+          approvalCode: inquiry.approvalCode,
+          stan: inquiry.fields['65'] || inquiry.fields['30'] || '',
+          rrn: inquiry.fields['D3'] || '',
+          merchantId: inquiry.fields['D1'] || '',
+          terminalId: inquiry.fields['16'] || '',
+          cardLabel: inquiry.fields['L7'] || inquiry.fields['D8'] || inquiry.fields['D7'] || '',
+          cardIssuer: inquiry.fields['D7'] || '',
+          cardScheme: inquiry.fields['D8'] || '',
+          acquirer: inquiry.fields['9H'] || inquiry.fields['9G'] || '',
+          maskedPan: inquiry.fields['30'] || '',
+          receiptData: inquiry.fields['RP'] || '',
+          date: inquiry.fields['03'] || '',
+          time: inquiry.fields['04'] || '',
+          amount: amount,
+          ecrRef: refNum,
+          fields: inquiry.fields,
+          rawHex: inquiry.rawHex,
+        };
+        this.lastTransaction = recoveredResult;
+        return recoveredResult;
+      }
+
+      // SCENARIO B: Inquiry succeeded but returned a NON-MATCHING transaction
+      // Requirement 2: Do NOT mark as cancelled or declined solely because FC 56 returns a non-matching previous transaction!
+      // The current transaction outcome is UNKNOWN / REQUIRES RECONCILIATION.
+      console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 returned non-matching transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}'). Transaction outcome is UNKNOWN.`);
+
+      recoveryAudit.status = 'UNRESOLVED';
+      recoveryAudit.unresolvedReason = `FC 56 inquiry did not match active transaction (Terminal had ref '${inqRef}' vs expected '${refNum}'). Outcome is UNKNOWN.`;
+      recoveryAudit.lastInquiry = {
+        ecn: inquiry.ecn,
+        inqRef,
+        inqAmountStr,
+        approvalCode: inquiry.approvalCode,
+        responseCode: inquiry.responseCode,
+        description: inquiry.description,
+      };
+
+      this.saveUnresolvedTransaction(recoveryAudit);
+
+      const unconfirmedErr = new Error(`Transaction outcome unknown for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
+      unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
+      unconfirmedErr.originalEcn = originalEcn;
+      unconfirmedErr.recoveryAttempts = recoveryAudit.recoveryAttempts;
+      unconfirmedErr.inquiry = inquiry;
+      unconfirmedErr.unresolved = recoveryAudit;
+      throw unconfirmedErr;
+    }
+
+    // SCENARIO C: All FC 56 transport attempts exhausted or failed
+    // Requirement 10: Mark outcome as UNKNOWN / REQUIRES RECONCILIATION rather than confirmed declined or cancelled.
+    console.error(`[NetsService] [POS-013] [${flowName}] All FC 56 recovery attempts exhausted. Final transport error: ${lastInqErr?.message}`);
+
+    recoveryAudit.status = 'UNRESOLVED';
+    recoveryAudit.unresolvedReason = `All FC 56 recovery attempts failed (${lastInqErr?.message}). Terminal status could not be verified. Outcome is UNKNOWN.`;
+    recoveryAudit.lastTransportError = {
+      code: lastInqErr?.code || 'ETIMEDOUT',
+      message: lastInqErr?.message || 'Terminal communication timed out',
+    };
+
+    this.saveUnresolvedTransaction(recoveryAudit);
+
+    const recoveryExhaustedErr = new Error(`Transaction outcome unknown for ${flowName}. Network recovery attempts to terminal exhausted. Manual reconciliation required. Do NOT recharge customer.`);
+    recoveryExhaustedErr.code = 'ERECONCILIATIONREQUIRED';
+    recoveryExhaustedErr.originalEcn = originalEcn;
+    recoveryExhaustedErr.recoveryAttempts = recoveryAudit.recoveryAttempts;
+    recoveryExhaustedErr.lastError = lastInqErr;
+    recoveryExhaustedErr.unresolved = recoveryAudit;
+    throw recoveryExhaustedErr;
   }
 
   /**
@@ -485,6 +774,9 @@ class NetsService {
    * Automatically triggers FC 84 (TMS / CTS Update) upon successful settlement per POS-001.
    */
   async settlement() {
+    if (this.unresolvedTransaction) {
+      throw new Error(`Cannot perform settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
+    }
     if (this.isProcessing) {
       throw new Error('A terminal operation is already in progress.');
     }
@@ -795,6 +1087,9 @@ class NetsService {
    * @private
    */
   async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    if (this.unresolvedTransaction) {
+      throw new Error(`Cannot initiate NETS Credit Card payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+    }
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);
     }
@@ -892,60 +1187,16 @@ class NetsService {
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
       if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        console.warn(`[${new Date().toISOString()}] [NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
-        try {
-          const inquiry = await this.getLastApprovedTransaction();
-
-          const inqRef = inquiry.fields['HS'] || inquiry.fields['HD'] || '';
-          const isRefMatched = inqRef.trim() === refNum.trim();
-
-          const inqAmountStr = inquiry.fields['40'] || '';
-          const isAmountMatched = inqAmountStr === amountStr;
-
-          if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
-            console.log(`[NetsService] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
-            const recoveredResult = {
-              ecn,
-              isApproved: true,
-              recovered: true,
-              paymentType: flowName,
-              txnType: 'I0',
-              functionCode: 'I0',
-              approvalReason: `Approved (Conclusively matched & recovered via FC 56 for ${flowName})`,
-              responseCode: inquiry.responseCode,
-              hostResponseCode: inquiry.parsed.hostResponseCode,
-              responseDescription: `Approved (Recovered via FC 56 Inquiry for ${flowName})`,
-              approvalCode: inquiry.approvalCode,
-              stan: inquiry.fields['65'] || inquiry.fields['30'] || '',
-              rrn: inquiry.fields['D3'] || '',
-              merchantId: inquiry.fields['D1'] || '',
-              terminalId: inquiry.fields['16'] || '',
-              cardLabel: inquiry.fields['L7'] || inquiry.fields['D8'] || inquiry.fields['D7'] || '',
-              cardIssuer: inquiry.fields['D7'] || '',
-              cardScheme: inquiry.fields['D8'] || '',
-              acquirer: inquiry.fields['9H'] || inquiry.fields['9G'] || '',
-              maskedPan: inquiry.fields['30'] || '',
-              receiptData: inquiry.fields['RP'] || '',
-              date: inquiry.fields['03'] || '',
-              time: inquiry.fields['04'] || '',
-              amount: amount,
-              ecrRef: refNum,
-              fields: inquiry.fields,
-              rawHex: inquiry.rawHex,
-            };
-            this.lastTransaction = recoveredResult;
-            return recoveredResult;
-          } else {
-            console.warn(`[NetsService] [${flowName}] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
-            const unconfirmedErr = new Error(`Transaction outcome uncertain for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
-            unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
-            unconfirmedErr.inquiry = inquiry;
-            throw unconfirmedErr;
-          }
-        } catch (inqErr) {
-          console.error(`[NetsService] [${flowName}] FC 56 recovery failed:`, inqErr.message);
-          throw inqErr;
-        }
+        return await this._recoverWithLastApproved({
+          originalEcn: ecn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: 'I0',
+          initialError: err,
+          onProgress,
+        });
       }
 
       throw err;
@@ -957,6 +1208,9 @@ class NetsService {
    * @private
    */
   async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
+    if (this.unresolvedTransaction) {
+      throw new Error(`Cannot initiate ${flowName} payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+    }
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);
     }
@@ -1047,59 +1301,16 @@ class NetsService {
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
       if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        console.warn(`[${new Date().toISOString()}] [NetsService] [${flowName}] Uncertain transaction outcome on ECN=${ecn} (${err.code || err.message}). Querying FC 56 to check terminal approval status.`);
-        try {
-          const inquiry = await this.getLastApprovedTransaction();
-
-          // RIGOROUS RECONCILIATION MATCHING:
-          // Check 1: ECR Reference Number match (HD or HS)
-          const inqRef = inquiry.fields['HS'] || inquiry.fields['HD'] || '';
-          const isRefMatched = inqRef.trim() === refNum.trim();
-
-          // Check 2: Transaction Amount match
-          const inqAmountStr = inquiry.fields['40'] || '';
-          const isAmountMatched = inqAmountStr === amountStr;
-
-          // Check 3: Strict Approval verification
-          if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
-            console.log(`[NetsService] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
-            const recoveredResult = {
-              ecn,
-              isApproved: true,
-              recovered: true,
-              paymentType: flowName,
-              txnType,
-              approvalReason: `Approved (Conclusively matched & recovered via FC 56 for ${flowName})`,
-              responseCode: inquiry.responseCode,
-              hostResponseCode: inquiry.parsed.hostResponseCode,
-              responseDescription: `Approved (Recovered via FC 56 Inquiry for ${flowName})`,
-              approvalCode: inquiry.approvalCode,
-              stan: inquiry.fields['65'] || '',
-              rrn: inquiry.fields['D3'] || '',
-              merchantId: inquiry.fields['D1'] || '',
-              terminalId: inquiry.fields['16'] || '',
-              cardLabel: inquiry.fields['L7'] || '',
-              receiptData: inquiry.fields['RP'] || '',
-              date: inquiry.fields['03'] || '',
-              time: inquiry.fields['04'] || '',
-              amount: amount,
-              ecrRef: refNum,
-              fields: inquiry.fields,
-              rawHex: inquiry.rawHex,
-            };
-            this.lastTransaction = recoveredResult;
-            return recoveredResult;
-          } else {
-            console.warn(`[NetsService] [${flowName}] FC 56 inquiry did not match active transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}').`);
-            const unconfirmedErr = new Error(`Transaction outcome uncertain for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
-            unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
-            unconfirmedErr.inquiry = inquiry;
-            throw unconfirmedErr;
-          }
-        } catch (inqErr) {
-          console.error(`[NetsService] [${flowName}] FC 56 recovery failed:`, inqErr.message);
-          throw inqErr;
-        }
+        return await this._recoverWithLastApproved({
+          originalEcn: ecn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType,
+          initialError: err,
+          onProgress,
+        });
       }
 
       throw err;
@@ -1255,5 +1466,7 @@ class NetsService {
   }
 }
 
-// Export singleton instance
-module.exports = new NetsService();
+// Export singleton instance and class definition for testing
+const netsServiceInstance = new NetsService();
+netsServiceInstance.NetsService = NetsService;
+module.exports = netsServiceInstance;

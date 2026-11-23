@@ -383,7 +383,7 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
     const syncStatus = isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
     const statusType = isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
     const userMessage = isUnknownStatus
-      ? 'Transaction Status Unknown'
+      ? 'Transaction Status Unknown / Requires Reconciliation'
       : isTimeout
         ? 'Transaction Timed Out'
         : err.message;
@@ -395,6 +395,8 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
         message: userMessage,
         paymentMethod: paymentMethodName,
         amount: parseFloat(amount),
+        unresolved: err.unresolved || null,
+        recoveryAttempts: err.recoveryAttempts || null,
       });
     }
     return res.status(500).json({
@@ -406,6 +408,9 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       paymentMethod: paymentMethodName,
       error: userMessage,
       errorCode: err.code || 'EUNKNOWN',
+      originalEcn: err.originalEcn || null,
+      recoveryAttempts: err.recoveryAttempts || null,
+      unresolved: err.unresolved || null,
     });
   }
 }
@@ -580,6 +585,9 @@ router.post('/reconcile-approved-transaction', async (req, res) => {
         });
       }
 
+      // If there was an unresolved lock for this transaction, clear it now that it is reconciled
+      netsService.saveUnresolvedTransaction(null);
+
       return res.json(reconciledResult);
     } else {
       const reason = !inquiry.success
@@ -609,6 +617,41 @@ router.post('/reconcile-approved-transaction', async (req, res) => {
       success: false,
       reconciled: false,
       error: `Reconciliation exception: ${err.message}`
+    });
+  }
+});
+
+/**
+ * GET /api/nets/unresolved-transaction
+ * Returns currently active unresolved transaction requiring reconciliation
+ */
+router.get('/unresolved-transaction', (req, res) => {
+  const unresolved = netsService.getUnresolvedTransaction();
+  res.json({
+    hasUnresolved: Boolean(unresolved),
+    unresolved,
+  });
+});
+
+/**
+ * POST /api/nets/clear-unresolved-transaction
+ * Verified administrative clearing requiring supervisor evidence
+ */
+router.post('/clear-unresolved-transaction', (req, res) => {
+  const { approvalCode, reconciliationReason, supervisorApproval } = req.body || {};
+  try {
+    const result = netsService.clearUnresolvedTransactionWithEvidence({
+      approvalCode,
+      reconciliationReason,
+      supervisorApproval,
+    });
+    logComm('ADMIN', 'Clear Unresolved Transaction With Evidence', result);
+    res.json(result);
+  } catch (err) {
+    logComm('ERR', 'Failed Clear Unresolved Transaction', { error: err.message });
+    res.status(400).json({
+      success: false,
+      error: err.message,
     });
   }
 });
