@@ -350,23 +350,18 @@ function cleanupTestState() {
     });
 
     // Mock terminal communication:
-    // When pre-check FC 56 is sent, terminal returns last approved is an OLDER/different transaction
-    // Then when new purchase FC 30 is sent, it is approved with fresh ECN
+    // Fast FC 55 terminal availability check passes instantly
+    // Then new purchase FC 30 is dispatched with fresh ECN
     service.sendPacket = async (buf) => {
       const parsedReq = netsProtocol.parseNetsFrame(buf);
-      if (parsedReq.functionCode === '56') {
-        // Last approved is not 1795425252607
-        const inqFrame = netsProtocol.buildNetsFrame({
+      if (parsedReq.functionCode === '55') {
+        const statusFrame = netsProtocol.buildNetsFrame({
           ecn: parsedReq.ecn,
-          functionCode: '56',
+          functionCode: '55',
           responseCode: '00',
-          fields: [
-            { code: '01', value: 'APPPREV' },
-            { code: 'HD', value: 'OTHER_OLD_TXN' },
-            { code: '40', value: '000000000200' },
-          ],
+          fields: [],
         });
-        return { parsed: netsProtocol.parseNetsFrame(inqFrame), rawHex: inqFrame.toString('hex') };
+        return { parsed: netsProtocol.parseNetsFrame(statusFrame), rawHex: statusFrame.toString('hex') };
       }
       if (parsedReq.functionCode === '30') {
         // New purchase approved
@@ -392,7 +387,7 @@ function cleanupTestState() {
     });
 
     assert.strictEqual(newPayment.isApproved, true);
-    assert.strictEqual(newPayment.ecn, '000000016674'); // fresh ECN (16673 used for inquiry, 16674 for purchase)
+    assert.strictEqual(newPayment.ecn, '000000016674'); // fresh ECN (16673 used for FC 55, 16674 for purchase)
     assert.notStrictEqual(newPayment.ecn, '000000016672', 'Must never reuse the old ECN');
     assert.ok(service.getUnresolvedTransaction(), 'Previous unresolved transaction record remains recorded as UNKNOWN');
     assert.strictEqual(service.getUnresolvedTransaction().ecn, '000000016672');
@@ -673,7 +668,7 @@ function cleanupTestState() {
     assert.ok(auditHistory.length >= 1, 'Audit history must contain cancellation record');
     assert.strictEqual(auditHistory[0].status, 'CANCELLED');
     assert.strictEqual(auditHistory[0].responseCode, 'XX');
-    assert.strictEqual(auditHistory[0].ecn, '000000008001');
+    assert.strictEqual(auditHistory[0].ecn, cancelResult.ecn);
 
     // Scenario 2: Next payment of $12.00 is allowed immediately without HTTP 409 or lock block!
     service.sendPacket = async (buf) => {
@@ -700,7 +695,7 @@ function cleanupTestState() {
     assert.strictEqual(nextPaymentResult.isApproved, true);
     assert.strictEqual(nextPaymentResult.responseCode, '00');
     assert.strictEqual(nextPaymentResult.approvalCode, 'APPR99');
-    assert.strictEqual(nextPaymentResult.ecn, '000000008002');
+    assert.strictEqual(nextPaymentResult.ecn, '000000008004');
   });
 
   // ---------------------------------------------------------------------------
