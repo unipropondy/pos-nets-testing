@@ -36,6 +36,15 @@ function logComm(direction, title, data) {
   return entry;
 }
 
+// Wire up POS-001 TMS state change listener to broadcast over Socket.IO and logComm
+netsService.setTmsStateListener((tmsState) => {
+  logComm('INFO', `POS-001 TMS State: ${tmsState.status}`, tmsState);
+  // Broadcast globally to all connected POS frontends
+  if (typeof global !== 'undefined' && global.io) {
+    global.io.emit('nets_tms_status', tmsState);
+  }
+});
+
 /**
  * GET /api/nets/config
  * Get current NETS terminal LAN configuration
@@ -45,6 +54,17 @@ router.get('/config', (req, res) => {
     success: true,
     config: netsService.config,
     currentEcn: netsService.getCurrentEcn(),
+  });
+});
+
+/**
+ * GET /api/nets/tms-status
+ * POS-001: Get current TMS / terminal reboot status
+ */
+router.get('/tms-status', (req, res) => {
+  res.json({
+    success: true,
+    tmsStatus: netsService.getTmsStatus(),
   });
 });
 

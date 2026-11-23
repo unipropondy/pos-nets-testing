@@ -18,6 +18,8 @@ import { Fonts } from "../constants/Fonts";
 import { useToast } from "../components/Toast";
 import { API_URL } from "../constants/Config";
 
+import { socket } from "../constants/socket";
+
 interface CommLog {
   id: string;
   timestamp: string;
@@ -45,6 +47,23 @@ export default function NetsAdminScreen() {
   const [lastResult, setLastResult] = useState<any>(null);
   const [commLogs, setCommLogs] = useState<CommLog[]>([]);
 
+  // POS-001: Automatic TMS Trigger & Terminal Lifecycle State
+  const [tmsStatus, setTmsStatus] = useState<{
+    status: string;
+    statusText: string;
+    lastSettlementEcn?: string;
+    lastSettlementTime?: string;
+    tmsEcn?: string;
+    tmsTriggerTime?: string;
+    terminalRebootStartTime?: string;
+    terminalReadyTime?: string;
+    pollCount?: number;
+    error?: string;
+  }>({
+    status: "idle",
+    statusText: "Terminal Ready",
+  });
+
   // End of Day Progress
   const [eodProgress, setEodProgress] = useState<{
     running: boolean;
@@ -57,9 +76,35 @@ export default function NetsAdminScreen() {
   useEffect(() => {
     fetchConfig();
     fetchLogs();
-    const interval = setInterval(fetchLogs, 4000);
-    return () => clearInterval(interval);
+    fetchTmsStatus();
+    const interval = setInterval(() => {
+      fetchLogs();
+      fetchTmsStatus();
+    }, 4000);
+
+    // Listen to real-time Socket.IO TMS events
+    const handleTmsSocketEvent = (state: any) => {
+      if (state) setTmsStatus(state);
+    };
+    socket.on("nets_tms_status", handleTmsSocketEvent);
+
+    return () => {
+      clearInterval(interval);
+      socket.off("nets_tms_status", handleTmsSocketEvent);
+    };
   }, []);
+
+  const fetchTmsStatus = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/nets/tms-status`);
+      const data = await res.json();
+      if (data.success && data.tmsStatus) {
+        setTmsStatus(data.tmsStatus);
+      }
+    } catch (err) {
+      // Ignore background poll errors
+    }
+  };
 
   const fetchConfig = async () => {
     try {
@@ -272,6 +317,59 @@ export default function NetsAdminScreen() {
             <TouchableOpacity style={styles.saveBtn} onPress={saveConfig} disabled={loading}>
               <Text style={styles.saveBtnText}>Save Settings</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* POS-001: Automatic TMS Trigger & Terminal Lifecycle Status Banner */}
+        <View style={[styles.card, styles.tmsCard]}>
+          <View style={styles.cardHeader}>
+            <Ionicons
+              name={
+                tmsStatus.status === "ready" || tmsStatus.status === "idle"
+                  ? "checkmark-circle-outline"
+                  : tmsStatus.status === "failed" || tmsStatus.status === "timed_out"
+                  ? "alert-circle-outline"
+                  : "sync-outline"
+              }
+              size={20}
+              color={
+                tmsStatus.status === "ready" || tmsStatus.status === "idle"
+                  ? "#10b981"
+                  : tmsStatus.status === "failed" || tmsStatus.status === "timed_out"
+                  ? "#ef4444"
+                  : "#f59e0b"
+              }
+            />
+            <Text style={styles.cardTitle}>POS-001: Automatic TMS Status</Text>
+            <View
+              style={[
+                styles.badge,
+                tmsStatus.status === "ready" || tmsStatus.status === "idle"
+                  ? styles.badgeRx
+                  : tmsStatus.status === "failed" || tmsStatus.status === "timed_out"
+                  ? styles.badgeErr
+                  : styles.badgeTx,
+                { marginLeft: "auto" },
+              ]}
+            >
+              <Text style={styles.badgeText}>{tmsStatus.status.toUpperCase()}</Text>
+            </View>
+          </View>
+
+          <Text style={[styles.tmsStatusMessage, { color: tmsStatus.status === "failed" || tmsStatus.status === "timed_out" ? "#f87171" : "#e2e8f0" }]}>
+            {tmsStatus.statusText}
+          </Text>
+
+          <View style={styles.tmsMetaGrid}>
+            {tmsStatus.lastSettlementEcn && (
+              <Text style={styles.tmsMetaItem}>Settlement ECN: {tmsStatus.lastSettlementEcn}</Text>
+            )}
+            {tmsStatus.tmsEcn && (
+              <Text style={styles.tmsMetaItem}>TMS ECN: {tmsStatus.tmsEcn}</Text>
+            )}
+            {tmsStatus.pollCount !== undefined && tmsStatus.pollCount > 0 && (
+              <Text style={styles.tmsMetaItem}>FC 55 Polls: {tmsStatus.pollCount}</Text>
+            )}
           </View>
         </View>
 
@@ -528,4 +626,29 @@ const styles = StyleSheet.create({
   logTitle: { color: "#FFF", fontSize: 12, fontFamily: Fonts.medium, flex: 1 },
   logTime: { color: "#64748b", fontSize: 10 },
   logData: { color: "#94a3b8", fontSize: 11, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+  tmsCard: {
+    borderColor: "#3b82f6",
+    borderWidth: 1.5,
+    backgroundColor: "#172554",
+  },
+  tmsStatusMessage: {
+    fontSize: 14,
+    fontFamily: Fonts.semiBold,
+    marginTop: 6,
+    marginBottom: 8,
+  },
+  tmsMetaGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    marginTop: 4,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#1e3a8a",
+  },
+  tmsMetaItem: {
+    fontSize: 12,
+    color: "#93c5fd",
+    fontFamily: Fonts.medium,
+  },
 });

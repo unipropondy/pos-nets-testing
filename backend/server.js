@@ -843,6 +843,8 @@ app.use('/api/nets', (req, res, next) => {
   req.io = io;
   next();
 }, netsRoutes);
+// Store global io instance so asynchronous terminal events (e.g. POS-001 background TMS trigger & polling) can broadcast
+global.io = io;
 app.use("/api/loyalty", loyaltyRoutes);
 app.use("/api/loyalty/configs", loyaltyConfigRoutes);
 app.use("/api/combo", comboRoutes);

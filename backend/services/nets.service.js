@@ -23,6 +23,25 @@ class NetsService {
     this.isProcessing = false;
     this.lastTransaction = null;
     this.ecnLock = false;
+
+    // POS-001: Automatic TMS Trigger & Terminal Lifecycle State
+    // Status can be: 'idle' | 'pending' | 'triggered' | 'terminal_rebooting' | 'ready' | 'failed' | 'timed_out'
+    this.tmsStatus = {
+      status: 'idle', // 'idle' | 'pending' | 'triggered' | 'terminal_rebooting' | 'ready' | 'failed' | 'timed_out'
+      statusText: 'Terminal Ready',
+      lastSettlementEcn: null,
+      lastSettlementTime: null,
+      tmsEcn: null,
+      tmsTriggerTime: null,
+      terminalRebootStartTime: null,
+      terminalReadyTime: null,
+      pollCount: 0,
+      error: null,
+      terminalInfo: null,
+    };
+    this.isTmsUpdating = false;
+    this.tmsPollTimeoutTimer = null;
+    this.onTmsStateChange = null;
   }
 
   loadConfig() {
@@ -429,9 +448,50 @@ class NetsService {
   }
 
   /**
+   * Set callback for TMS state change broadcasts (e.g. Socket.IO)
+   */
+  setTmsStateListener(listener) {
+    this.onTmsStateChange = listener;
+  }
+
+  /**
+   * Internal helper to update and broadcast TMS state
+   */
+  _updateTmsStatus(updates = {}) {
+    this.tmsStatus = {
+      ...this.tmsStatus,
+      ...updates,
+      timestamp: new Date().toISOString(),
+    };
+    console.log(`[NetsService] [POS-001] TMS Status -> ${this.tmsStatus.status} (${this.tmsStatus.statusText})`);
+    if (typeof this.onTmsStateChange === 'function') {
+      try {
+        this.onTmsStateChange({ ...this.tmsStatus });
+      } catch (err) {
+        console.error('[NetsService] Error notifying onTmsStateChange:', err.message);
+      }
+    }
+  }
+
+  /**
+   * Returns current TMS / reboot status
+   */
+  getTmsStatus() {
+    return { ...this.tmsStatus };
+  }
+
+  /**
    * FC 81: NETS Settlement
+   * Automatically triggers FC 84 (TMS / CTS Update) upon successful settlement per POS-001.
    */
   async settlement() {
+    if (this.isProcessing) {
+      throw new Error('A terminal operation is already in progress.');
+    }
+    if (this.isTmsUpdating) {
+      throw new Error(`Terminal is currently rebooting/updating via TMS. Please wait until ready.`);
+    }
+
     const ecn = await this.getNextEcnAsync();
     const frame = buildNetsFrame({
       ecn,
@@ -442,15 +502,172 @@ class NetsService {
 
     console.log(`[NetsService] Sending FC 81 (NETS Settlement) ECN=${ecn}`);
     const res = await this.sendPacket(frame, this.config.adminTimeoutMs);
-    return {
+    const isSuccess = res.parsed.responseCode === '00';
+
+    const settlementResult = {
       ecn,
-      success: res.parsed.responseCode === '00',
+      success: isSuccess,
       responseCode: res.parsed.responseCode,
       description: res.parsed.responseDescription,
       fields: res.parsed.fields,
       rawHex: res.rawHex,
       parsed: res.parsed,
     };
+
+    // POS-001: Automatic TMS Trigger After Successful Settlement
+    if (isSuccess) {
+      console.log(`[NetsService] [POS-001] Settlement FC81 succeeded (ECN=${ecn}). Automatically triggering TMS (FC84)...`);
+      // Trigger asynchronously so settlement response returns immediately to cashier,
+      // while TMS update & terminal reboot monitoring proceed in background.
+      this.triggerTmsAfterSettlement(ecn).catch((tmsErr) => {
+        console.error(`[NetsService] [POS-001] Error during automated TMS trigger:`, tmsErr.message);
+      });
+    } else {
+      console.warn(`[NetsService] [POS-001] Settlement FC81 did not succeed (RC=${res.parsed.responseCode}). FC84 will NOT be triggered.`);
+    }
+
+    return settlementResult;
+  }
+
+  /**
+   * POS-001: Automated TMS Workflow Runner
+   * 1. Validate against duplicate trigger for same settlement ECN.
+   * 2. Wait 2 seconds before dispatching FC84.
+   * 3. Send FC84 with unique 12-digit ECN.
+   * 4. Receive and validate acknowledgement.
+   * 5. Monitor terminal reboot via periodic FC55 status polling until terminal is ready.
+   * 6. Block any payment / settlement commands during reboot window.
+   */
+  async triggerTmsAfterSettlement(settlementEcn) {
+    // 1. Prevent duplicate execution for the same successful settlement
+    if (this.tmsStatus.lastSettlementEcn === settlementEcn && (this.tmsStatus.status === 'triggered' || this.tmsStatus.status === 'terminal_rebooting')) {
+      console.warn(`[NetsService] [POS-001] Duplicate FC84 trigger ignored for Settlement ECN=${settlementEcn}`);
+      return;
+    }
+
+    this.isTmsUpdating = true;
+    this._updateTmsStatus({
+      status: 'pending',
+      statusText: 'Settlement Succeeded. Preparing TMS Update...',
+      lastSettlementEcn: settlementEcn,
+      lastSettlementTime: new Date().toISOString(),
+      pollCount: 0,
+      error: null,
+    });
+
+    // Short buffer (2 seconds) after FC81 before sending FC84
+    await new Promise((r) => setTimeout(r, 2000));
+
+    try {
+      this._updateTmsStatus({
+        status: 'triggered',
+        statusText: 'Triggering TMS Update (FC 84)...',
+        tmsTriggerTime: new Date().toISOString(),
+      });
+
+      const tmsRes = await this.tmsUpdate();
+      console.log(`[NetsService] [POS-001] FC84 Response received:`, tmsRes);
+
+      if (tmsRes.success) {
+        // Acknowledgement received (RC=00)
+        this._updateTmsStatus({
+          status: 'terminal_rebooting',
+          statusText: 'TMS Triggered. Terminal Rebooting...',
+          tmsEcn: tmsRes.ecn,
+          terminalRebootStartTime: new Date().toISOString(),
+        });
+
+        // Begin polling FC55 to detect when terminal finishes reboot and returns to ready state
+        this.pollTerminalReadyAfterTms();
+      } else {
+        this.isTmsUpdating = false;
+        this._updateTmsStatus({
+          status: 'failed',
+          statusText: `TMS Trigger Rejected by Terminal (${tmsRes.responseCode}: ${tmsRes.description})`,
+          error: tmsRes.description,
+        });
+      }
+    } catch (err) {
+      this.isTmsUpdating = false;
+      this._updateTmsStatus({
+        status: 'failed',
+        statusText: `TMS Communication Error: ${err.message}`,
+        error: err.message,
+      });
+      console.error(`[NetsService] [POS-001] Failed to send FC84:`, err.message);
+    }
+  }
+
+  /**
+   * POS-001: Poll terminal status (FC 55) after TMS trigger until terminal is ready.
+   * Per NETS specification, after receiving FC84 acknowledgement, the terminal reboots.
+   * During reboot, TCP connections may drop or refuse until terminal OS finishes booting.
+   * Once the terminal accepts FC55 and responds with RC='00', the terminal is confirmed Ready.
+   */
+  async pollTerminalReadyAfterTms() {
+    if (this.tmsPollTimeoutTimer) {
+      clearTimeout(this.tmsPollTimeoutTimer);
+      this.tmsPollTimeoutTimer = null;
+    }
+
+    const startTime = Date.now();
+    const maxPollDurationMs = 120000; // 2 minutes maximum reboot window
+    const pollIntervalMs = 5000;      // Poll every 5 seconds
+    // Initial delay before first poll: allow terminal time to close connection and begin rebooting
+    const initialRebootDelayMs = 8000;
+
+    await new Promise((r) => setTimeout(r, initialRebootDelayMs));
+
+    let pollCount = 0;
+
+    const executePoll = async () => {
+      pollCount++;
+      const elapsed = Date.now() - startTime;
+
+      if (elapsed > maxPollDurationMs) {
+        console.error(`[NetsService] [POS-001] Terminal reboot poll timed out after ${Math.round(elapsed / 1000)}s.`);
+        this.isTmsUpdating = false;
+        this._updateTmsStatus({
+          status: 'timed_out',
+          statusText: 'Terminal Reboot Timed Out. Please verify terminal display.',
+          pollCount,
+          error: 'Max reboot timeout exceeded',
+        });
+        return;
+      }
+
+      console.log(`[NetsService] [POS-001] Polling Terminal Status (FC 55) [Attempt ${pollCount}, ${Math.round(elapsed / 1000)}s elapsed]...`);
+      this._updateTmsStatus({
+        pollCount,
+        statusText: `Terminal Rebooting... Checking status (${Math.round(elapsed / 1000)}s)`,
+      });
+
+      try {
+        const statusRes = await this.requestTerminalStatus();
+        console.log(`[NetsService] [POS-001] FC 55 poll response: RC=${statusRes.responseCode}, Success=${statusRes.success}`);
+
+        if (statusRes.success && statusRes.responseCode === '00') {
+          console.log(`[NetsService] [POS-001] Terminal is CONFIRMED READY after TMS/Reboot!`);
+          this.isTmsUpdating = false;
+          this._updateTmsStatus({
+            status: 'ready',
+            statusText: 'TMS Complete. Terminal Ready.',
+            terminalReadyTime: new Date().toISOString(),
+            terminalInfo: statusRes.fields,
+          });
+          return;
+        } else {
+          // Terminal responded but returned non-00 status; wait for next cycle
+          this.tmsPollTimeoutTimer = setTimeout(executePoll, pollIntervalMs);
+        }
+      } catch (pollErr) {
+        // Expected during physical reboot: ECONNREFUSED, ETIMEDOUT, socket reset
+        console.log(`[NetsService] [POS-001] Terminal still rebooting / unreachable (${pollErr.message}). Retrying in ${pollIntervalMs / 1000}s...`);
+        this.tmsPollTimeoutTimer = setTimeout(executePoll, pollIntervalMs);
+      }
+    };
+
+    executePoll();
   }
 
   /**
@@ -580,6 +797,9 @@ class NetsService {
   async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);
+    }
+    if (this.isTmsUpdating) {
+      throw new Error(`NETS terminal is currently performing TMS update / reboot (${this.tmsStatus.statusText}). Payment commands are temporarily blocked.`);
     }
 
     const flowName = 'NETS Credit Card';
@@ -739,6 +959,9 @@ class NetsService {
   async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);
+    }
+    if (this.isTmsUpdating) {
+      throw new Error(`NETS terminal is currently performing TMS update / reboot (${this.tmsStatus.statusText}). Payment commands are temporarily blocked.`);
     }
 
     this.isProcessing = true;
