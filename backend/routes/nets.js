@@ -380,17 +380,20 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
   } catch (err) {
     logComm('ERR', `${title} Failure`, { error: err.message, code: err.code });
     const isConflict = Boolean(err.code === 'EUNRESOLVED_TRANSACTION');
+    const isBusy = Boolean(err.code === 'ETERMINALBUSY' || err.isNak);
     const isTimeout = Boolean(err.isTimeout || err.code === 'ETIMEDOUT');
     const isUnknownStatus = Boolean(err.code === 'ERECONCILIATIONREQUIRED' || err.isUncertain);
-    const syncStatus = isConflict ? 'BLOCKED_UNRESOLVED' : isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
-    const statusType = isConflict ? 'conflict' : isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
-    const userMessage = isConflict
-      ? err.message
-      : isUnknownStatus
-        ? 'Transaction Status Unknown / Requires Reconciliation'
-        : isTimeout
-          ? 'Transaction Timed Out'
-          : err.message;
+    const syncStatus = isBusy ? 'TERMINAL_BUSY' : isConflict ? 'BLOCKED_UNRESOLVED' : isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
+    const statusType = isBusy ? 'busy' : isConflict ? 'conflict' : isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
+    const userMessage = isBusy
+      ? err.message || 'Terminal is currently busy. Please wait a moment and try again.'
+      : isConflict
+        ? err.message
+        : isUnknownStatus
+          ? 'Transaction Status Unknown / Requires Reconciliation'
+          : isTimeout
+            ? 'Transaction Timed Out'
+            : err.message;
 
     if (io) {
       io.emit('terminal_payment_sync', {
@@ -404,11 +407,12 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       });
     }
 
-    const httpStatus = isConflict ? 409 : 500;
+    const httpStatus = isBusy ? 429 : isConflict ? 409 : 500;
     return res.status(httpStatus).json({
       success: false,
       approved: false,
       status: statusType,
+      isBusy,
       isConflict,
       isTimeout,
       isUnknownStatus,

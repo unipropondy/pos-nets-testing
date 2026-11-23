@@ -283,55 +283,128 @@ function cleanupTestState() {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 5: Unresolved transaction locks all new financial operations
+  // Test 5: Concurrency guard and Terminal Busy behavior
   // ---------------------------------------------------------------------------
-  await runAsyncTest('Unresolved transaction blocks new Card, QR, Credit Card, and Settlement operations', async () => {
+  await runAsyncTest('Terminal concurrency guard blocks overlapping operations and handles busy terminal', async () => {
     cleanupTestState();
     const service = new NetsService();
-    // Simulate an active unresolved state
-    service.saveUnresolvedTransaction({
-      ecn: '000000016663',
-      originalEcn: '000000016663',
-      ecrRef: 'LOCKED_REF_001',
-      amount: 10.00,
-      status: 'UNRESOLVED',
-    });
+    let testEcn = 3000;
+    service.getNextEcnAsync = async () => String(++testEcn).padStart(12, '0');
 
-    // 1. Check purchaseCard blocked
-    let cardBlocked = false;
+    // 1. Terminal is actively processing an operation
+    service.isProcessing = true;
+    let busyErr = null;
     try {
-      await service.purchaseCard({ amount: 10, ecrRef: 'NEW_ORDER' });
+      await service.purchaseCard({ amount: 10, ecrRef: 'CONCURRENT_1' });
     } catch (e) {
-      if (e.message.includes('unresolved transaction exists')) cardBlocked = true;
+      busyErr = e;
     }
-    assert.strictEqual(cardBlocked, true, 'purchaseCard must be blocked');
+    assert.strictEqual(busyErr?.code, 'ETERMINALBUSY');
+    service.isProcessing = false;
 
-    // 2. Check purchaseQr blocked
-    let qrBlocked = false;
+    // 2. Terminal returns NAK (0x15) when busy
+    service.sendPacket = async () => {
+      const nakErr = new Error('Terminal Busy (NAK 0x15 received from terminal)');
+      nakErr.code = 'ETERMINALBUSY';
+      nakErr.isNak = true;
+      throw nakErr;
+    };
+
+    let nakCaught = null;
     try {
-      await service.purchaseQr({ amount: 10, ecrRef: 'NEW_ORDER' });
+      await service.purchaseCard({ amount: 10, ecrRef: 'NAK_TEST' });
     } catch (e) {
-      if (e.message.includes('unresolved transaction exists')) qrBlocked = true;
+      nakCaught = e;
     }
-    assert.strictEqual(qrBlocked, true, 'purchaseQr must be blocked');
+    assert.ok(nakCaught?.message?.toLowerCase().includes('busy'));
 
-    // 3. Check purchaseCreditCard blocked
-    let creditBlocked = false;
+    // 3. Concurrency guard blocks overlapping settlement and credit card operations
+    service.isProcessing = true;
+    let ccBusyErr = null;
     try {
-      await service.purchaseCreditCard({ amount: 10, ecrRef: 'NEW_ORDER' });
+      await service.purchaseCreditCard({ amount: 20, ecrRef: 'CC_CONC' });
     } catch (e) {
-      if (e.message.includes('unresolved transaction exists')) creditBlocked = true;
+      ccBusyErr = e;
     }
-    assert.strictEqual(creditBlocked, true, 'purchaseCreditCard must be blocked');
+    assert.strictEqual(ccBusyErr?.code, 'ETERMINALBUSY');
 
-    // 4. Check settlement blocked
-    let settlementBlocked = false;
+    let settBusyErr = null;
     try {
       await service.settlement();
     } catch (e) {
-      if (e.message.includes('unresolved transaction exists')) settlementBlocked = true;
+      settBusyErr = e;
     }
-    assert.strictEqual(settlementBlocked, true, 'settlement must be blocked');
+    assert.strictEqual(settBusyErr?.code, 'ETERMINALBUSY');
+    service.isProcessing = false;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 5B: Unresolved transaction does not permanently block subsequent independent payments
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Unresolved transaction does not block separate payment with fresh ECN when terminal is available', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+    let ecnCounter = 16672;
+    service.getNextEcnAsync = async () => String(++ecnCounter).padStart(12, '0');
+
+    // Simulate existing unresolved transaction on disk
+    service.saveUnresolvedTransaction({
+      ecn: '000000016672',
+      originalEcn: '000000016672',
+      ecrRef: '1795425252607',
+      amount: 5.50,
+      amountStr: '000000000550',
+      flowName: 'NETS Card',
+      status: 'UNRESOLVED',
+    });
+
+    // Mock terminal communication:
+    // When pre-check FC 56 is sent, terminal returns last approved is an OLDER/different transaction
+    // Then when new purchase FC 30 is sent, it is approved with fresh ECN
+    service.sendPacket = async (buf) => {
+      const parsedReq = netsProtocol.parseNetsFrame(buf);
+      if (parsedReq.functionCode === '56') {
+        // Last approved is not 1795425252607
+        const inqFrame = netsProtocol.buildNetsFrame({
+          ecn: parsedReq.ecn,
+          functionCode: '56',
+          responseCode: '00',
+          fields: [
+            { code: '01', value: 'APPPREV' },
+            { code: 'HD', value: 'OTHER_OLD_TXN' },
+            { code: '40', value: '000000000200' },
+          ],
+        });
+        return { parsed: netsProtocol.parseNetsFrame(inqFrame), rawHex: inqFrame.toString('hex') };
+      }
+      if (parsedReq.functionCode === '30') {
+        // New purchase approved
+        const appFrame = netsProtocol.buildNetsFrame({
+          ecn: parsedReq.ecn,
+          functionCode: '30',
+          responseCode: '00',
+          fields: [
+            { code: '01', value: 'APPNEW01' },
+            { code: 'HC', value: '00' },
+            { code: 'HD', value: parsedReq.fields['HD'] || 'NEW_REF_01' },
+            { code: '40', value: parsedReq.fields['40'] || '000000001000' },
+          ],
+        });
+        return { parsed: netsProtocol.parseNetsFrame(appFrame), rawHex: appFrame.toString('hex') };
+      }
+      throw new Error(`Unexpected functionCode: ${parsedReq.functionCode}`);
+    };
+
+    const newPayment = await service.purchaseCard({
+      amount: 10.00,
+      ecrRef: 'NEW_ORDER_9999',
+    });
+
+    assert.strictEqual(newPayment.isApproved, true);
+    assert.strictEqual(newPayment.ecn, '000000016674'); // fresh ECN (16673 used for inquiry, 16674 for purchase)
+    assert.notStrictEqual(newPayment.ecn, '000000016672', 'Must never reuse the old ECN');
+    assert.ok(service.getUnresolvedTransaction(), 'Previous unresolved transaction record remains recorded as UNKNOWN');
+    assert.strictEqual(service.getUnresolvedTransaction().ecn, '000000016672');
   });
 
   // ---------------------------------------------------------------------------
@@ -533,9 +606,9 @@ function cleanupTestState() {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 11: Blocked financial operations throw EUNRESOLVED_TRANSACTION with 409-ready payload
+  // Test 11: Verified evidence-based reconciliation and targetEcn validation
   // ---------------------------------------------------------------------------
-  await runAsyncTest('Blocked operations throw EUNRESOLVED_TRANSACTION error code', async () => {
+  await runAsyncTest('Administrative clearing requires targetEcn match and evidence', async () => {
     cleanupTestState();
     const service = new NetsService();
     service.saveUnresolvedTransaction({
@@ -545,15 +618,6 @@ function cleanupTestState() {
       amount: 5.50,
       status: 'UNRESOLVED',
     });
-
-    let cardErr = null;
-    try {
-      await service.purchaseCard({ amount: 5.50, ecrRef: '1795425252608' });
-    } catch (e) {
-      cardErr = e;
-    }
-    assert.strictEqual(cardErr?.code, 'EUNRESOLVED_TRANSACTION');
-    assert.strictEqual(cardErr?.unresolved?.ecn, '000000016672');
 
     // Test targetEcn mismatch check
     let mismatchErr = null;
