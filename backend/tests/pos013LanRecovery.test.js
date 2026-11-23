@@ -21,7 +21,9 @@ const fs = require('fs');
 const path = require('path');
 
 const UNRESOLVED_TEST_PATH = path.join(__dirname, '../config/netsUnresolved.test.json');
+const AUDIT_TEST_PATH = path.join(__dirname, '../config/netsAuditHistory.test.json');
 process.env.NETS_UNRESOLVED_FILE_PATH = UNRESOLVED_TEST_PATH;
+process.env.NETS_AUDIT_FILE_PATH = AUDIT_TEST_PATH;
 
 const netsServiceModule = require('../services/nets.service');
 const NetsService = netsServiceModule.NetsService;
@@ -42,6 +44,9 @@ async function runAsyncTest(name, fn) {
 function cleanupTestState() {
   if (fs.existsSync(UNRESOLVED_TEST_PATH)) {
     fs.unlinkSync(UNRESOLVED_TEST_PATH);
+  }
+  if (fs.existsSync(AUDIT_TEST_PATH)) {
+    fs.unlinkSync(AUDIT_TEST_PATH);
   }
 }
 
@@ -571,7 +576,128 @@ function cleanupTestState() {
     assert.strictEqual(service.getUnresolvedTransaction(), null);
   });
 
+  // ---------------------------------------------------------------------------
+  // Test 12: Confirmed terminal cancellation (RC=XX) updates state to CANCELLED,
+  // clears unresolved lock, records in audit history, and allows next payment
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Confirmed terminal cancellation (RC=XX) clears lock, records in audit, and allows next payment', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+    let ecnSeq = 8000;
+    service.getNextEcnAsync = async () => String(++ecnSeq).padStart(12, '0');
+
+    // Scenario 1: First payment cancelled by terminal with RC=XX
+    service.sendPacket = async (buf) => {
+      const parsedReq = netsProtocol.parseNetsFrame(buf);
+      const cancelFrame = netsProtocol.buildNetsFrame({
+        ecn: parsedReq.ecn,
+        functionCode: parsedReq.functionCode,
+        responseCode: 'XX',
+        fields: [
+          { code: '01', value: '' },
+          { code: 'HD', value: 'P1795425252607' },
+          { code: '40', value: '000000000550' },
+        ],
+      });
+      return { parsed: netsProtocol.parseNetsFrame(cancelFrame), rawHex: cancelFrame.toString('hex') };
+    };
+
+    const cancelResult = await service.purchaseCard({
+      amount: 5.50,
+      ecrRef: 'P1795425252607',
+    });
+
+    assert.strictEqual(cancelResult.isApproved, false);
+    assert.strictEqual(cancelResult.responseCode, 'XX');
+    assert.strictEqual(cancelResult.responseDescription, 'Transaction Cancelled by User / Terminal');
+    assert.strictEqual(service.getUnresolvedTransaction(), null, 'Lock must be completely cleared upon confirmed cancellation');
+
+    // Verify audit history was written to disk
+    const auditHistory = service.getAuditHistory();
+    assert.ok(auditHistory.length >= 1, 'Audit history must contain cancellation record');
+    assert.strictEqual(auditHistory[0].status, 'CANCELLED');
+    assert.strictEqual(auditHistory[0].responseCode, 'XX');
+    assert.strictEqual(auditHistory[0].ecn, '000000008001');
+
+    // Scenario 2: Next payment of $12.00 is allowed immediately without HTTP 409 or lock block!
+    service.sendPacket = async (buf) => {
+      const parsedReq = netsProtocol.parseNetsFrame(buf);
+      const approveFrame = netsProtocol.buildNetsFrame({
+        ecn: parsedReq.ecn,
+        functionCode: parsedReq.functionCode,
+        responseCode: '00',
+        fields: [
+          { code: '01', value: 'APPR99' },
+          { code: 'HC', value: '00' },
+          { code: 'HD', value: 'P1795425252608' },
+          { code: '40', value: '000000001200' },
+        ],
+      });
+      return { parsed: netsProtocol.parseNetsFrame(approveFrame), rawHex: approveFrame.toString('hex') };
+    };
+
+    const nextPaymentResult = await service.purchaseCard({
+      amount: 12.00,
+      ecrRef: 'P1795425252608',
+    });
+
+    assert.strictEqual(nextPaymentResult.isApproved, true);
+    assert.strictEqual(nextPaymentResult.responseCode, '00');
+    assert.strictEqual(nextPaymentResult.approvalCode, 'APPR99');
+    assert.strictEqual(nextPaymentResult.ecn, '000000008002');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 13: Confirmed cancellation works identically for Credit Card (FC I0) and QR (T2=04)
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Confirmed cancellation allows immediate next Credit Card and QR payments', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+    let ecnSeq = 9000;
+    service.getNextEcnAsync = async () => String(++ecnSeq).padStart(12, '0');
+
+    // Credit Card Cancelled
+    service.sendPacket = async (buf) => {
+      const parsedReq = netsProtocol.parseNetsFrame(buf);
+      const cancelFrame = netsProtocol.buildNetsFrame({
+        ecn: parsedReq.ecn,
+        functionCode: 'I0',
+        responseCode: 'XX',
+        fields: [
+          { code: 'HD', value: 'P1795425252610' },
+          { code: '40', value: '000000002000' },
+        ],
+      });
+      return { parsed: netsProtocol.parseNetsFrame(cancelFrame), rawHex: cancelFrame.toString('hex') };
+    };
+
+    const ccCancel = await service.purchaseCreditCard({ amount: 20.00, ecrRef: 'P1795425252610' });
+    assert.strictEqual(ccCancel.responseCode, 'XX');
+    assert.strictEqual(service.getUnresolvedTransaction(), null);
+
+    // Immediately follow with QR Payment
+    service.sendPacket = async (buf) => {
+      const parsedReq = netsProtocol.parseNetsFrame(buf);
+      const approveQr = netsProtocol.buildNetsFrame({
+        ecn: parsedReq.ecn,
+        functionCode: '30',
+        responseCode: '00',
+        fields: [
+          { code: 'T2', value: '04' },
+          { code: 'HC', value: '00' },
+          { code: 'HD', value: 'P1795425252611' },
+          { code: '40', value: '000000001500' },
+        ],
+      });
+      return { parsed: netsProtocol.parseNetsFrame(approveQr), rawHex: approveQr.toString('hex') };
+    };
+
+    const qrResult = await service.purchaseQr({ amount: 15.00, ecrRef: 'P1795425252611' });
+    assert.strictEqual(qrResult.isApproved, true);
+    assert.strictEqual(qrResult.responseCode, '00');
+  });
+
   cleanupTestState();
-  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (11/11) ===');
+  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (13/13) ===');
   process.exit(0);
 })();

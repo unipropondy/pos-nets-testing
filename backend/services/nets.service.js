@@ -15,6 +15,7 @@ const {
 const CONFIG_FILE_PATH = path.join(__dirname, '../config/netsConfig.json');
 const ECN_FILE_PATH = path.join(__dirname, '../config/netsEcn.json');
 const UNRESOLVED_FILE_PATH = process.env.NETS_UNRESOLVED_FILE_PATH || path.join(__dirname, '../config/netsUnresolved.json');
+const AUDIT_FILE_PATH = process.env.NETS_AUDIT_FILE_PATH || path.join(__dirname, '../config/netsAuditHistory.json');
 
 class NetsService {
   constructor() {
@@ -117,6 +118,67 @@ class NetsService {
     return process.env.NETS_UNRESOLVED_FILE_PATH || path.join(__dirname, '../config/netsUnresolved.json');
   }
 
+  getAuditFilePath() {
+    return process.env.NETS_AUDIT_FILE_PATH || path.join(__dirname, '../config/netsAuditHistory.json');
+  }
+
+  /**
+   * Appends a transaction record to the permanent NETS audit history.
+   * Preserves confirmed cancellations, reconciled transactions, and resolved locks.
+   *
+   * @param {Object} record
+   */
+  recordAuditHistory(record) {
+    if (!record) return;
+    try {
+      const filePath = this.getAuditFilePath();
+      const dir = path.dirname(filePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+      let history = [];
+      if (fs.existsSync(filePath)) {
+        try {
+          const raw = fs.readFileSync(filePath, 'utf8');
+          history = JSON.parse(raw);
+          if (!Array.isArray(history)) history = [];
+        } catch (_) {
+          history = [];
+        }
+      }
+
+      const entry = {
+        ...record,
+        recordedAt: new Date().toISOString(),
+      };
+
+      // Keep latest 500 audit entries
+      history.unshift(entry);
+      if (history.length > 500) history.pop();
+
+      fs.writeFileSync(filePath, JSON.stringify(history, null, 2), 'utf8');
+      console.log(`[NetsService] [AUDIT] Transaction recorded in audit history: ECN=${entry.ecn || entry.originalEcn}, Status=${entry.status || (entry.isApproved ? 'APPROVED' : 'DECLINED/CANCELLED')}, Ref=${entry.ecrRef}`);
+    } catch (err) {
+      console.error('[NetsService] Error recording audit history:', err.message);
+    }
+  }
+
+  /**
+   * Retrieves permanent NETS audit history.
+   */
+  getAuditHistory() {
+    try {
+      const filePath = this.getAuditFilePath();
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const history = JSON.parse(raw);
+        return Array.isArray(history) ? history : [];
+      }
+    } catch (err) {
+      console.error('[NetsService] Error reading audit history:', err.message);
+    }
+    return [];
+  }
+
   loadUnresolvedTransaction() {
     try {
       const filePath = this.getUnresolvedFilePath();
@@ -176,6 +238,12 @@ class NetsService {
 
     const previous = { ...this.unresolvedTransaction };
     console.log(`[NetsService] [POS-013] Clearing unresolved transaction ECN=${previous.ecn} with evidence:`, evidence);
+    this.recordAuditHistory({
+      ...previous,
+      status: 'ADMIN_CLEARED_WITH_EVIDENCE',
+      evidence,
+      clearedAt: new Date().toISOString(),
+    });
     this.saveUnresolvedTransaction(null);
     return {
       success: true,
@@ -670,6 +738,10 @@ class NetsService {
           rawHex: inquiry.rawHex,
         };
         this.lastTransaction = recoveredResult;
+        this.recordAuditHistory({
+          ...recoveredResult,
+          status: 'RECOVERED_APPROVED',
+        });
         return recoveredResult;
       }
 
@@ -1121,6 +1193,7 @@ class NetsService {
     }
 
     const flowName = 'NETS Credit Card';
+    const txnType = 'I0';
     this.isProcessing = true;
     let ecn = null;
     let amountStr = '';
@@ -1198,6 +1271,33 @@ class NetsService {
       };
 
       this.lastTransaction = result;
+
+      // Handle Authoritative Terminal Cancellation (Response Code XX)
+      const resEcn = (res.parsed.ecn || '').trim();
+      const isCancellation = res.parsed.responseCode === 'XX' && resEcn === ecn;
+      if (isCancellation) {
+        console.warn(`[NetsService] [${flowName}] Authoritative terminal cancellation confirmed (RC=XX, ECN=${ecn}, Ref=${refNum}). Marking CANCELLED.`);
+        if (this.unresolvedTransaction && (this.unresolvedTransaction.ecn === ecn || this.unresolvedTransaction.originalEcn === ecn)) {
+          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${this.unresolvedTransaction.ecn} safely cleared.`);
+          this.saveUnresolvedTransaction(null);
+        }
+        this.recordAuditHistory({
+          ecn,
+          ecrRef: refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: 'I0',
+          functionCode: 'I0',
+          status: 'CANCELLED',
+          responseCode: 'XX',
+          responseDescription: res.parsed.responseDescription || 'Transaction Cancelled by User / Terminal',
+          cancelledAt: new Date().toISOString(),
+          rawHex: res.rawHex,
+          details: result,
+        });
+      }
+
       return result;
     } catch (err) {
       this.isProcessing = false;
@@ -1216,7 +1316,7 @@ class NetsService {
           amount,
           amountStr,
           flowName,
-          txnType: 'I0',
+          txnType: txnType || '01',
           initialError: err,
           onProgress,
         });
@@ -1310,6 +1410,33 @@ class NetsService {
       };
 
       this.lastTransaction = result;
+
+      // Handle Authoritative Terminal Cancellation (Response Code XX)
+      const resEcn = (res.parsed.ecn || '').trim();
+      const isCancellation = res.parsed.responseCode === 'XX' && resEcn === ecn;
+      if (isCancellation) {
+        console.warn(`[NetsService] [${flowName}] Authoritative terminal cancellation confirmed (RC=XX, ECN=${ecn}, Ref=${refNum}). Marking CANCELLED.`);
+        if (this.unresolvedTransaction && (this.unresolvedTransaction.ecn === ecn || this.unresolvedTransaction.originalEcn === ecn)) {
+          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${this.unresolvedTransaction.ecn} safely cleared.`);
+          this.saveUnresolvedTransaction(null);
+        }
+        this.recordAuditHistory({
+          ecn,
+          ecrRef: refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: txnType || '01',
+          functionCode: '30',
+          status: 'CANCELLED',
+          responseCode: 'XX',
+          responseDescription: res.parsed.responseDescription || 'Transaction Cancelled by User / Terminal',
+          cancelledAt: new Date().toISOString(),
+          rawHex: res.rawHex,
+          details: result,
+        });
+      }
+
       return result;
     } catch (err) {
       this.isProcessing = false;
