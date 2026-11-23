@@ -1603,12 +1603,19 @@ export default function PaymentScreen() {
 
       console.log(`🔄 [MainPayment] Calling NETS endpoint: ${endpoint} for: ${method} (isCredit: ${isNetsCreditCardMode}, isQr: ${isNetsQrMode}, Amount: ${total})`);
 
+      const paymentRequestId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+
       const fetchPromise = (async () => {
         try {
           const response = await fetch(`${API_URL}${endpoint}`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'x-request-id': paymentRequestId,
               ...(useAuthStore.getState().token ? { 'Authorization': `Bearer ${useAuthStore.getState().token}` } : {}),
             },
             body: JSON.stringify({

@@ -21,7 +21,8 @@ class NetsService {
   constructor() {
     this.config = this.loadConfig();
     this.currentEcn = this.loadEcn();
-    this.unresolvedTransaction = this.loadUnresolvedTransaction();
+    this.unresolvedTransactions = this.loadUnresolvedTransactions();
+    // Maintain unresolvedTransaction getter/setter compatibility pointing to latest unresolved record
     this.activeSocket = null;
     this.isProcessing = false;
     this.isRecoveryInProgress = false;
@@ -179,39 +180,89 @@ class NetsService {
     return [];
   }
 
-  loadUnresolvedTransaction() {
+  get unresolvedTransaction() {
+    if (!this.unresolvedTransactions || this.unresolvedTransactions.length === 0) return null;
+    return this.unresolvedTransactions[0];
+  }
+
+  set unresolvedTransaction(val) {
+    if (!val) {
+      this.unresolvedTransactions = [];
+    } else {
+      if (!Array.isArray(this.unresolvedTransactions)) this.unresolvedTransactions = [];
+      const idx = this.unresolvedTransactions.findIndex(t => t.ecn === val.ecn || t.originalEcn === val.originalEcn);
+      if (idx >= 0) {
+        this.unresolvedTransactions[idx] = val;
+      } else {
+        this.unresolvedTransactions.unshift(val);
+      }
+    }
+  }
+
+  loadUnresolvedTransactions() {
     try {
       const filePath = this.getUnresolvedFilePath();
       if (fs.existsSync(filePath)) {
         const raw = fs.readFileSync(filePath, 'utf8');
         const data = JSON.parse(raw);
-        if (data && data.ecn && data.status === 'UNRESOLVED') {
-          console.warn(`[NetsService] Loaded PERSISTED unresolved transaction lock: ECN=${data.ecn}, ref=${data.ecrRef}, amount=${data.amount}`);
-          return data;
+        if (Array.isArray(data)) {
+          const valid = data.filter(d => d && d.ecn && (d.status === 'UNRESOLVED' || d.status === 'RECOVERY_IN_PROGRESS'));
+          if (valid.length > 0) {
+            console.warn(`[NetsService] Loaded ${valid.length} PERSISTED unresolved transaction record(s)`);
+          }
+          return valid;
+        } else if (data && data.ecn && (data.status === 'UNRESOLVED' || data.status === 'RECOVERY_IN_PROGRESS')) {
+          console.warn(`[NetsService] Loaded single PERSISTED unresolved transaction lock: ECN=${data.ecn}`);
+          return [data];
         }
       }
     } catch (err) {
-      console.error('[NetsService] Error loading unresolved transaction:', err.message);
+      console.error('[NetsService] Error loading unresolved transactions:', err.message);
     }
-    return null;
+    return [];
   }
 
-  saveUnresolvedTransaction(unresolvedData) {
-    this.unresolvedTransaction = unresolvedData;
+  loadUnresolvedTransaction() {
+    const list = this.loadUnresolvedTransactions();
+    return list.length > 0 ? list[0] : null;
+  }
+
+  saveUnresolvedTransactions(unresolvedList) {
+    this.unresolvedTransactions = Array.isArray(unresolvedList) ? unresolvedList : (unresolvedList ? [unresolvedList] : []);
     try {
       const filePath = this.getUnresolvedFilePath();
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      if (unresolvedData) {
-        fs.writeFileSync(filePath, JSON.stringify(unresolvedData, null, 2), 'utf8');
-        console.warn(`[NetsService] [POS-013] Unresolved transaction state PERSISTED: ECN=${unresolvedData.ecn}, Ref=${unresolvedData.ecrRef}`);
+
+      if (this.unresolvedTransactions.length > 0) {
+        fs.writeFileSync(filePath, JSON.stringify(this.unresolvedTransactions, null, 2), 'utf8');
+        console.warn(`[NetsService] [POS-013] Persisted ${this.unresolvedTransactions.length} unresolved transaction record(s). Latest ECN=${this.unresolvedTransactions[0]?.ecn}`);
       } else if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
         console.log(`[NetsService] [POS-013] Unresolved transaction state CLEARED from persistence.`);
       }
     } catch (err) {
-      console.error('[NetsService] Error persisting unresolved transaction:', err.message);
+      console.error('[NetsService] Error persisting unresolved transactions:', err.message);
     }
+  }
+
+  saveUnresolvedTransaction(unresolvedData) {
+    if (!unresolvedData) {
+      this.saveUnresolvedTransactions([]);
+      return;
+    }
+    const currentList = this.loadUnresolvedTransactions();
+    const existingIndex = currentList.findIndex(t => (t.ecn && t.ecn === unresolvedData.ecn) || (t.originalEcn && t.originalEcn === unresolvedData.originalEcn));
+    if (existingIndex >= 0) {
+      currentList[existingIndex] = unresolvedData;
+    } else {
+      currentList.unshift(unresolvedData);
+    }
+    this.saveUnresolvedTransactions(currentList);
+  }
+
+  getUnresolvedTransactions() {
+    return Array.isArray(this.unresolvedTransactions) ? [...this.unresolvedTransactions] : [];
   }
 
   getUnresolvedTransaction() {
@@ -221,34 +272,48 @@ class NetsService {
   /**
    * Verified administrative reconciliation clearing method.
    * Requires verified reconciliation evidence (e.g. matching terminal slip or confirmed approval code).
-   * Unrestricted / empty clears are strictly forbidden.
+   * Supports targetEcn to clear a specific record when multiple exist.
    */
   clearUnresolvedTransactionWithEvidence(evidence = {}) {
-    if (!this.unresolvedTransaction) {
+    const currentList = this.loadUnresolvedTransactions();
+    if (!currentList || currentList.length === 0) {
       return { success: true, message: 'No active unresolved transaction.' };
     }
 
-    if (evidence.targetEcn && this.unresolvedTransaction.ecn !== evidence.targetEcn) {
-      throw new Error(`Target ECN mismatch: active unresolved transaction has ECN=${this.unresolvedTransaction.ecn}, but request specified targetEcn=${evidence.targetEcn}`);
+    let targetRecord = null;
+    let targetIndex = -1;
+
+    if (evidence.targetEcn) {
+      targetIndex = currentList.findIndex(t => t.ecn === evidence.targetEcn || t.originalEcn === evidence.targetEcn);
+      if (targetIndex < 0) {
+        throw new Error(`Target ECN mismatch: no unresolved transaction found with ECN=${evidence.targetEcn}`);
+      }
+      targetRecord = currentList[targetIndex];
+    } else {
+      targetIndex = 0;
+      targetRecord = currentList[0];
     }
 
     if (!evidence || (!evidence.approvalCode && !evidence.reconciliationReason && !evidence.supervisorApproval)) {
       throw new Error('Administrative clearing requires verified reconciliation evidence (approvalCode, reconciliationReason, or supervisorApproval).');
     }
 
-    const previous = { ...this.unresolvedTransaction };
-    console.log(`[NetsService] [POS-013] Clearing unresolved transaction ECN=${previous.ecn} with evidence:`, evidence);
+    console.log(`[NetsService] [POS-013] Clearing unresolved transaction ECN=${targetRecord.ecn} with evidence:`, evidence);
     this.recordAuditHistory({
-      ...previous,
+      ...targetRecord,
       status: 'ADMIN_CLEARED_WITH_EVIDENCE',
       evidence,
       clearedAt: new Date().toISOString(),
     });
-    this.saveUnresolvedTransaction(null);
+
+    currentList.splice(targetIndex, 1);
+    this.saveUnresolvedTransactions(currentList);
+
     return {
       success: true,
-      message: `Unresolved transaction ECN=${previous.ecn} cleared successfully with evidence.`,
-      clearedTransaction: previous,
+      message: `Unresolved transaction ECN=${targetRecord.ecn} cleared successfully with evidence.`,
+      clearedTransaction: targetRecord,
+      remainingCount: currentList.length,
       evidence,
       clearedAt: new Date().toISOString(),
     };
@@ -603,10 +668,10 @@ class NetsService {
       throw err;
     }
 
-    // If there is an unresolved transaction, attempt pre-flight FC 56 reconciliation check
-    if (this.unresolvedTransaction) {
-      const unres = this.unresolvedTransaction;
-      console.log(`[NetsService] [POS-013] Unresolved transaction detected before new ${flowName} (ECN=${unres.ecn}, Ref=${unres.ecrRef}). Performing pre-purchase FC 56 check...`);
+    // If there are unresolved transactions, attempt pre-flight FC 56 reconciliation check
+    const unresList = this.loadUnresolvedTransactions();
+    if (unresList && unresList.length > 0) {
+      console.log(`[NetsService] [POS-013] ${unresList.length} unresolved transaction(s) detected before new ${flowName}. Performing pre-purchase FC 56 check...`);
 
       try {
         const inquiryEcn = await this.getNextEcnAsync();
@@ -615,25 +680,32 @@ class NetsService {
         if (inquiry && inquiry.success && inquiry.parsed) {
           const inqRef = (inquiry.fields['HD'] || inquiry.fields['HS'] || '').trim();
           const inqAmountStr = (inquiry.fields['40'] || '').trim();
-          const isRefMatched = inqRef === unres.ecrRef;
-          const isAmountMatched = inqAmountStr === unres.amountStr;
 
-          if (isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
-            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 confirmed previous transaction ECN=${unres.ecn} was APPROVED! Reconciling now.`);
-            this.saveUnresolvedTransaction(null);
+          // Check if terminal's last approved matches ANY unresolved transaction
+          const matchedIndex = unresList.findIndex(unres => {
+            const isRefMatched = inqRef === unres.ecrRef;
+            const isAmountMatched = inqAmountStr === unres.amountStr;
+            return isRefMatched && isAmountMatched && inquiry.parsed.isApproved;
+          });
+
+          if (matchedIndex >= 0) {
+            const matchedUnres = unresList[matchedIndex];
+            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 confirmed previous transaction ECN=${matchedUnres.ecn} was APPROVED! Reconciling now.`);
             this.recordAuditHistory({
-              ecn: unres.ecn,
-              originalEcn: unres.originalEcn || unres.ecn,
-              ecrRef: unres.ecrRef,
-              amount: unres.amount,
-              amountStr: unres.amountStr,
-              flowName: unres.flowName,
+              ecn: matchedUnres.ecn,
+              originalEcn: matchedUnres.originalEcn || matchedUnres.ecn,
+              ecrRef: matchedUnres.ecrRef,
+              amount: matchedUnres.amount,
+              amountStr: matchedUnres.amountStr,
+              flowName: matchedUnres.flowName,
               status: 'RECOVERED_APPROVED',
               reconciledAt: new Date().toISOString(),
               details: inquiry,
             });
+            unresList.splice(matchedIndex, 1);
+            this.saveUnresolvedTransactions(unresList);
           } else {
-            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 showed terminal has different or no record for previous transaction (Terminal inqRef='${inqRef}' vs unres='${unres.ecrRef}'). Previous remains UNKNOWN; allowing new payment.`);
+            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 showed terminal has different or no record for previous transaction(s) (Terminal inqRef='${inqRef}'). Unresolved transactions remain UNKNOWN; allowing new payment.`);
           }
         }
       } catch (inqErr) {
@@ -775,8 +847,13 @@ class NetsService {
       // SCENARIO A: Conclusive Approval Match
       if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
         console.log(`[NetsService] [POS-013] [${flowName}] Transaction conclusively matched & recovered via FC 56! Approved.`);
-        // If an unresolved lock existed, clean it up since transaction is confirmed approved
-        this.saveUnresolvedTransaction(null);
+        // If an unresolved record existed for this transaction, clean only this matching record
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn);
+        if (unresIdx >= 0) {
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        }
 
         const recoveredResult = {
           ecn: originalEcn,
@@ -818,30 +895,51 @@ class NetsService {
       }
 
       // SCENARIO B: Inquiry succeeded but returned a NON-MATCHING transaction
-      // Requirement 2: Do NOT mark as cancelled or declined solely because FC 56 returns a non-matching previous transaction!
-      // The current transaction outcome is UNKNOWN / REQUIRES RECONCILIATION.
-      console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 returned non-matching transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}'). Transaction outcome is UNKNOWN.`);
+      // POS-013 Test Specification Expectation:
+      // When FC 56 succeeds and confirms the terminal's last approved transaction does NOT match
+      // this transaction (different reference or amount), the original transaction was NOT approved on the terminal.
+      // In accordance with the test specification, POS marks the original payment as UNSUCCESSFUL.
+      console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 returned non-matching transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}'). Terminal confirmed transaction was NOT approved. Marking original payment UNSUCCESSFUL.`);
 
-      recoveryAudit.status = 'UNRESOLVED';
-      recoveryAudit.unresolvedReason = `FC 56 inquiry did not match active transaction (Terminal had ref '${inqRef}' vs expected '${refNum}'). Outcome is UNKNOWN.`;
-      recoveryAudit.lastInquiry = {
-        ecn: inquiry.ecn,
-        inqRef,
-        inqAmountStr,
-        approvalCode: inquiry.approvalCode,
-        responseCode: inquiry.responseCode,
-        description: inquiry.description,
+      const unsuccessfulResult = {
+        ecn: originalEcn,
+        recoveryEcn: inquiry.ecn,
+        recoveryAttempts: recoveryAudit.recoveryAttempts,
+        isApproved: false,
+        recovered: true,
+        paymentType: flowName,
+        txnType,
+        functionCode: txnType === 'I0' ? 'I0' : '30',
+        approvalReason: 'Transaction Unsuccessful (Terminal confirmed non-matching last approved transaction via FC 56)',
+        responseCode: 'XX',
+        responseDescription: 'Transaction Unsuccessful (Cancelled / Not Approved on Terminal)',
+        ecrRef: refNum,
+        amount: amount,
+        inquirySummary: {
+          terminalRef: inqRef,
+          terminalAmount: inqAmountStr,
+          terminalApproval: inquiry.approvalCode,
+          terminalStatus: inquiry.description,
+        },
+        rawHex: inquiry.rawHex,
       };
 
-      this.saveUnresolvedTransaction(recoveryAudit);
+      this.lastTransaction = unsuccessfulResult;
+      this.recordAuditHistory({
+        ...unsuccessfulResult,
+        status: 'UNSUCCESSFUL_CONFIRMED_BY_FC56',
+        recordedAt: new Date().toISOString(),
+      });
 
-      const unconfirmedErr = new Error(`Transaction outcome unknown for ${flowName}. FC 56 inquiry did not match this order. Manual reconciliation required. Do NOT recharge customer.`);
-      unconfirmedErr.code = 'ERECONCILIATIONREQUIRED';
-      unconfirmedErr.originalEcn = originalEcn;
-      unconfirmedErr.recoveryAttempts = recoveryAudit.recoveryAttempts;
-      unconfirmedErr.inquiry = inquiry;
-      unconfirmedErr.unresolved = recoveryAudit;
-      throw unconfirmedErr;
+      // Clear matching unresolved record if one was previously created for this transaction
+      const currentUnresList = this.loadUnresolvedTransactions();
+      const existingUnresIdx = currentUnresList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn);
+      if (existingUnresIdx >= 0) {
+        currentUnresList.splice(existingUnresIdx, 1);
+        this.saveUnresolvedTransactions(currentUnresList);
+      }
+
+      return unsuccessfulResult;
     }
 
     // SCENARIO C: All FC 56 transport attempts exhausted or failed
@@ -1326,9 +1424,12 @@ class NetsService {
       const isCancellation = res.parsed.responseCode === 'XX' && resEcn === ecn;
       if (isCancellation) {
         console.warn(`[NetsService] [${flowName}] Authoritative terminal cancellation confirmed (RC=XX, ECN=${ecn}, Ref=${refNum}). Marking CANCELLED.`);
-        if (this.unresolvedTransaction && (this.unresolvedTransaction.ecn === ecn || this.unresolvedTransaction.originalEcn === ecn)) {
-          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${this.unresolvedTransaction.ecn} safely cleared.`);
-          this.saveUnresolvedTransaction(null);
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn);
+        if (unresIdx >= 0) {
+          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${unresList[unresIdx].ecn} safely cleared.`);
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
         }
         this.recordAuditHistory({
           ecn,
@@ -1455,9 +1556,12 @@ class NetsService {
       const isCancellation = res.parsed.responseCode === 'XX' && resEcn === ecn;
       if (isCancellation) {
         console.warn(`[NetsService] [${flowName}] Authoritative terminal cancellation confirmed (RC=XX, ECN=${ecn}, Ref=${refNum}). Marking CANCELLED.`);
-        if (this.unresolvedTransaction && (this.unresolvedTransaction.ecn === ecn || this.unresolvedTransaction.originalEcn === ecn)) {
-          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${this.unresolvedTransaction.ecn} safely cleared.`);
-          this.saveUnresolvedTransaction(null);
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn);
+        if (unresIdx >= 0) {
+          console.warn(`[NetsService] [${flowName}] Matching unresolved transaction lock ECN=${unresList[unresIdx].ecn} safely cleared.`);
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
         }
         this.recordAuditHistory({
           ecn,
