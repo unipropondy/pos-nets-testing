@@ -19,11 +19,13 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+
+const UNRESOLVED_TEST_PATH = path.join(__dirname, '../config/netsUnresolved.test.json');
+process.env.NETS_UNRESOLVED_FILE_PATH = UNRESOLVED_TEST_PATH;
+
 const netsServiceModule = require('../services/nets.service');
 const NetsService = netsServiceModule.NetsService;
 const netsProtocol = require('../utils/netsProtocol');
-
-const UNRESOLVED_TEST_PATH = path.join(__dirname, '../config/netsUnresolved.json');
 
 async function runAsyncTest(name, fn) {
   try {
@@ -525,7 +527,51 @@ function cleanupTestState() {
     assert.strictEqual(frame[20], expectedLrc);
   });
 
+  // ---------------------------------------------------------------------------
+  // Test 11: Blocked financial operations throw EUNRESOLVED_TRANSACTION with 409-ready payload
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Blocked operations throw EUNRESOLVED_TRANSACTION error code', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+    service.saveUnresolvedTransaction({
+      ecn: '000000016672',
+      originalEcn: '000000016672',
+      ecrRef: '1795425252607',
+      amount: 5.50,
+      status: 'UNRESOLVED',
+    });
+
+    let cardErr = null;
+    try {
+      await service.purchaseCard({ amount: 5.50, ecrRef: '1795425252608' });
+    } catch (e) {
+      cardErr = e;
+    }
+    assert.strictEqual(cardErr?.code, 'EUNRESOLVED_TRANSACTION');
+    assert.strictEqual(cardErr?.unresolved?.ecn, '000000016672');
+
+    // Test targetEcn mismatch check
+    let mismatchErr = null;
+    try {
+      service.clearUnresolvedTransactionWithEvidence({
+        targetEcn: '000000019999',
+        approvalCode: 'APP01',
+      });
+    } catch (e) {
+      mismatchErr = e;
+    }
+    assert.ok(mismatchErr?.message?.includes('Target ECN mismatch'));
+
+    // Test targetEcn match success
+    const clearRes = service.clearUnresolvedTransactionWithEvidence({
+      targetEcn: '000000016672',
+      approvalCode: 'APP01',
+    });
+    assert.strictEqual(clearRes.success, true);
+    assert.strictEqual(service.getUnresolvedTransaction(), null);
+  });
+
   cleanupTestState();
-  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (10/10) ===');
+  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (11/11) ===');
   process.exit(0);
 })();

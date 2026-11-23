@@ -379,15 +379,18 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
     }
   } catch (err) {
     logComm('ERR', `${title} Failure`, { error: err.message, code: err.code });
+    const isConflict = Boolean(err.code === 'EUNRESOLVED_TRANSACTION');
     const isTimeout = Boolean(err.isTimeout || err.code === 'ETIMEDOUT');
     const isUnknownStatus = Boolean(err.code === 'ERECONCILIATIONREQUIRED' || err.isUncertain);
-    const syncStatus = isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
-    const statusType = isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
-    const userMessage = isUnknownStatus
-      ? 'Transaction Status Unknown / Requires Reconciliation'
-      : isTimeout
-        ? 'Transaction Timed Out'
-        : err.message;
+    const syncStatus = isConflict ? 'BLOCKED_UNRESOLVED' : isUnknownStatus ? 'UNKNOWN' : isTimeout ? 'TIMEOUT' : 'FAILED';
+    const statusType = isConflict ? 'conflict' : isUnknownStatus ? 'unknown' : isTimeout ? 'timeout' : 'failed';
+    const userMessage = isConflict
+      ? err.message
+      : isUnknownStatus
+        ? 'Transaction Status Unknown / Requires Reconciliation'
+        : isTimeout
+          ? 'Transaction Timed Out'
+          : err.message;
 
     if (io) {
       io.emit('terminal_payment_sync', {
@@ -400,10 +403,13 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
         recoveryAttempts: err.recoveryAttempts || null,
       });
     }
-    return res.status(500).json({
+
+    const httpStatus = isConflict ? 409 : 500;
+    return res.status(httpStatus).json({
       success: false,
       approved: false,
       status: statusType,
+      isConflict,
       isTimeout,
       isUnknownStatus,
       paymentMethod: paymentMethodName,
@@ -639,12 +645,13 @@ router.get('/unresolved-transaction', (req, res) => {
  * Verified administrative clearing requiring supervisor evidence
  */
 router.post('/clear-unresolved-transaction', (req, res) => {
-  const { approvalCode, reconciliationReason, supervisorApproval } = req.body || {};
+  const { approvalCode, reconciliationReason, supervisorApproval, targetEcn } = req.body || {};
   try {
     const result = netsService.clearUnresolvedTransactionWithEvidence({
       approvalCode,
       reconciliationReason,
       supervisorApproval,
+      targetEcn,
     });
     logComm('ADMIN', 'Clear Unresolved Transaction With Evidence', result);
     res.json(result);
