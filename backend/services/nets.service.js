@@ -14,7 +14,7 @@ const {
 
 const CONFIG_FILE_PATH = path.join(__dirname, '../config/netsConfig.json');
 const ECN_FILE_PATH = path.join(__dirname, '../config/netsEcn.json');
-const UNRESOLVED_FILE_PATH = path.join(__dirname, '../config/netsUnresolved.json');
+const UNRESOLVED_FILE_PATH = process.env.NETS_UNRESOLVED_FILE_PATH || path.join(__dirname, '../config/netsUnresolved.json');
 
 class NetsService {
   constructor() {
@@ -113,10 +113,15 @@ class NetsService {
     }
   }
 
+  getUnresolvedFilePath() {
+    return process.env.NETS_UNRESOLVED_FILE_PATH || path.join(__dirname, '../config/netsUnresolved.json');
+  }
+
   loadUnresolvedTransaction() {
     try {
-      if (fs.existsSync(UNRESOLVED_FILE_PATH)) {
-        const raw = fs.readFileSync(UNRESOLVED_FILE_PATH, 'utf8');
+      const filePath = this.getUnresolvedFilePath();
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf8');
         const data = JSON.parse(raw);
         if (data && data.ecn && data.status === 'UNRESOLVED') {
           console.warn(`[NetsService] Loaded PERSISTED unresolved transaction lock: ECN=${data.ecn}, ref=${data.ecrRef}, amount=${data.amount}`);
@@ -132,13 +137,14 @@ class NetsService {
   saveUnresolvedTransaction(unresolvedData) {
     this.unresolvedTransaction = unresolvedData;
     try {
-      const dir = path.dirname(UNRESOLVED_FILE_PATH);
+      const filePath = this.getUnresolvedFilePath();
+      const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       if (unresolvedData) {
-        fs.writeFileSync(UNRESOLVED_FILE_PATH, JSON.stringify(unresolvedData, null, 2), 'utf8');
+        fs.writeFileSync(filePath, JSON.stringify(unresolvedData, null, 2), 'utf8');
         console.warn(`[NetsService] [POS-013] Unresolved transaction state PERSISTED: ECN=${unresolvedData.ecn}, Ref=${unresolvedData.ecrRef}`);
-      } else if (fs.existsSync(UNRESOLVED_FILE_PATH)) {
-        fs.unlinkSync(UNRESOLVED_FILE_PATH);
+      } else if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
         console.log(`[NetsService] [POS-013] Unresolved transaction state CLEARED from persistence.`);
       }
     } catch (err) {
@@ -158,6 +164,10 @@ class NetsService {
   clearUnresolvedTransactionWithEvidence(evidence = {}) {
     if (!this.unresolvedTransaction) {
       return { success: true, message: 'No active unresolved transaction.' };
+    }
+
+    if (evidence.targetEcn && this.unresolvedTransaction.ecn !== evidence.targetEcn) {
+      throw new Error(`Target ECN mismatch: active unresolved transaction has ECN=${this.unresolvedTransaction.ecn}, but request specified targetEcn=${evidence.targetEcn}`);
     }
 
     if (!evidence || (!evidence.approvalCode && !evidence.reconciliationReason && !evidence.supervisorApproval)) {
@@ -776,7 +786,10 @@ class NetsService {
    */
   async settlement() {
     if (this.unresolvedTransaction) {
-      throw new Error(`Cannot perform settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
+      const err = new Error(`Cannot perform settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
+      err.code = 'EUNRESOLVED_TRANSACTION';
+      err.unresolved = { ...this.unresolvedTransaction };
+      throw err;
     }
     if (this.isProcessing) {
       throw new Error('A terminal operation is already in progress.');
@@ -972,6 +985,12 @@ class NetsService {
    * @param {string} [acquirer="DBS"]
    */
   async creditSettlement(acquirer = 'DBS') {
+    if (this.unresolvedTransaction) {
+      const err = new Error(`Cannot perform credit settlement while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Please reconcile first.`);
+      err.code = 'EUNRESOLVED_TRANSACTION';
+      err.unresolved = { ...this.unresolvedTransaction };
+      throw err;
+    }
     const ecn = await this.getNextEcnAsync();
     // 6-character padded acquirer code as specified
     const acquirerPadded = acquirer.padEnd(6, ' ').slice(0, 6);
@@ -1089,7 +1108,10 @@ class NetsService {
    */
   async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
     if (this.unresolvedTransaction) {
-      throw new Error(`Cannot initiate NETS Credit Card payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+      const err = new Error(`Cannot initiate NETS Credit Card payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+      err.code = 'EUNRESOLVED_TRANSACTION';
+      err.unresolved = { ...this.unresolvedTransaction };
+      throw err;
     }
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);
@@ -1210,7 +1232,10 @@ class NetsService {
    */
   async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
     if (this.unresolvedTransaction) {
-      throw new Error(`Cannot initiate ${flowName} payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+      const err = new Error(`Cannot initiate ${flowName} payment while an unresolved transaction exists (ECN=${this.unresolvedTransaction.ecn}, Ref=${this.unresolvedTransaction.ecrRef}). Manual reconciliation is required.`);
+      err.code = 'EUNRESOLVED_TRANSACTION';
+      err.unresolved = { ...this.unresolvedTransaction };
+      throw err;
     }
     if (this.isProcessing) {
       throw new Error(`A payment transaction is already in progress on the terminal.`);

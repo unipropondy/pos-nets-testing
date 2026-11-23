@@ -1,0 +1,36 @@
+{
+  "ecn": "000000016672",
+  "originalEcn": "000000016672",
+  "ecrRef": "1795425252607",
+  "amount": 5.5,
+  "amountStr": "000000000550",
+  "flowName": "NETS Card",
+  "txnType": "01",
+  "initialErrorCode": "ECONNRESET",
+  "initialErrorMessage": "read ECONNRESET",
+  "startedAt": "2026-11-23T09:12:00.000Z",
+  "recoveryAttempts": [
+    {
+      "attempt": 1,
+      "recoveryEcn": "000000016673",
+      "timestamp": "2026-11-23T09:12:04.000Z",
+      "success": false,
+      "errorCode": "ETIMEDOUT",
+      "errorMessage": "Terminal communication timed out after 35 seconds"
+    },
+    {
+      "attempt": 2,
+      "recoveryEcn": "000000016674",
+      "timestamp": "2026-11-23T09:12:41.000Z",
+      "success": false,
+      "errorCode": "ECONNRESET",
+      "errorMessage": "read ECONNRESET"
+    }
+  ],
+  "status": "UNRESOLVED",
+  "unresolvedReason": "All FC 56 recovery attempts failed (read ECONNRESET). Terminal status could not be verified. Outcome is UNKNOWN.",
+  "lastTransportError": {
+    "code": "ECONNRESET",
+    "message": "read ECONNRESET"
+  }
+}

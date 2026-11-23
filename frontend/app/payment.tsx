@@ -180,7 +180,7 @@ export default function PaymentScreen() {
   const memberPhone = params.memberPhone as string | undefined;
   const isMember = params.isMember === "true";
   const isLedgerCollection = !!memberId;
-  const [paymentStatus, setPaymentStatus] = useState<"idle" | "processing" | "success" | "cancelled" | "failed">("idle");
+  const [paymentStatus, setPaymentStatus] = useState<"idle" | "processing" | "reconciling" | "success" | "cancelled" | "failed">("idle");
   const [paymentMessage, setPaymentMessage] = useState("");
   const allocationsParam = useMemo(() => {
     if (!params.allocations) return null;
@@ -360,7 +360,7 @@ export default function PaymentScreen() {
     if (isFocused) {
       const activeTblId = context?.tableId ? String(context.tableId) : undefined;
       const activeSession = activeTblId ? useTerminalPaymentStore.getState().sessions[activeTblId] : undefined;
-      if (!activeSession || activeSession.status !== "processing") {
+      if (!activeSession || (activeSession.status !== "processing" && activeSession.status !== "reconciling")) {
         setPaymentStatus("idle");
         setPaymentMessage("");
         setProcessing(false);
@@ -387,7 +387,7 @@ export default function PaymentScreen() {
 
       setPaymentStatus(terminalSession.status);
       setPaymentMessage(terminalSession.message);
-      setProcessing(terminalSession.status === "processing");
+      setProcessing(terminalSession.status === "processing" || terminalSession.status === "reconciling");
       if (terminalSession.method) {
         setMethod(terminalSession.method);
       }
@@ -1511,7 +1511,7 @@ export default function PaymentScreen() {
 
   const handleSelectMethod = (m: PaymentMethod) => {
     // 🚫 Block switching payment method while a terminal payment is in flight
-    if (paymentStatus === "processing") {
+    if (paymentStatus === "processing" || paymentStatus === "reconciling") {
       Alert.alert(
         "Payment In Progress",
         "A payment is currently being processed on the terminal. Please wait for it to complete.",
@@ -3435,11 +3435,11 @@ export default function PaymentScreen() {
                         paymentStatus === "success" && styles.statusSuccess,
                         paymentStatus === "cancelled" && styles.statusCancelled,
                         paymentStatus === "failed" && styles.statusFailed,
-                        paymentStatus === "processing" && styles.statusProcessing,
+                        (paymentStatus === "processing" || paymentStatus === "reconciling") && styles.statusProcessing,
                         { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }
                       ]}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1, gap: 8 }}>
-                          {paymentStatus === "processing" ? (
+                          {(paymentStatus === "processing" || paymentStatus === "reconciling") ? (
                             <RotatingSyncIcon size={24} color="#3b82f6" />
                           ) : (
                             <Ionicons
@@ -3461,13 +3461,13 @@ export default function PaymentScreen() {
                             paymentStatus === "success" && styles.statusMessageSuccess,
                             paymentStatus === "cancelled" && styles.statusMessageCancelled,
                             paymentStatus === "failed" && styles.statusMessageFailed,
-                            paymentStatus === "processing" && styles.statusMessageProcessing,
+                            (paymentStatus === "processing" || paymentStatus === "reconciling") && styles.statusMessageProcessing,
                             { flex: 1, marginRight: 8 }
                           ]}>
                             {paymentMessage}
                           </Text>
                         </View>
-                        {paymentStatus !== "processing" && (
+                        {(paymentStatus !== "processing" && paymentStatus !== "reconciling") && (
                           <TouchableOpacity
                             onPress={() => {
                               if (context?.tableId) {
