@@ -198,6 +198,9 @@ function cleanupTestState() {
   await runAsyncTest('POS-014: FC 56 recovery matches customer approval, returns approved, and clears unresolved entry', async () => {
     cleanupTestState();
     const service = new NetsService();
+    // Test FC 56 strategy specifically
+    service.config.autoRetryWithSameEcn = false;
+    service.config.lastApprovedQueryOnTimeout = true;
     let ecnCounter = 8000;
     service.getNextEcnAsync = async () => String(++ecnCounter).padStart(12, '0');
     service.config.recoveryInitialDelayMs = 10;

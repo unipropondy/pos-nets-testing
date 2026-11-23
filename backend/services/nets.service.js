@@ -776,6 +776,282 @@ class NetsService {
   }
 
   /**
+   * POS-014: Same-ECN Recovery Handler.
+   * Recovers an uncertain transaction by resending the request using the SAME original ECN,
+   * original amount, and original ECR reference number without generating a new ECN.
+   *
+   * Validations enforced:
+   * 1. Original ECN === Recovery ECN.
+   * 2. Zero calls to ECN sequence generator.
+   * 3. Terminal concurrency guard (isProcessing / isRecoveryInProgress).
+   * 4. Scoped unresolved record clearing only upon confirmed matching approval.
+   *
+   * @private
+   */
+  async _recoverWithSameEcn({
+    originalEcn,
+    refNum,
+    amount,
+    amountStr,
+    flowName,
+    txnType,
+    initialError,
+    onProgress = null,
+  }) {
+    if (this.isRecoveryInProgress) {
+      console.warn(`[NetsService] [POS-014] [${flowName}] Recovery already in progress for ECN=${originalEcn}. Rejecting concurrent recovery loop.`);
+      throw new Error(`Recovery already in progress for this transaction (ECN=${originalEcn}).`);
+    }
+
+    const recoveryEcn = originalEcn;
+    // CRITICAL VALIDATION: Original ECN === Recovery ECN
+    if (!originalEcn || !recoveryEcn || originalEcn !== recoveryEcn) {
+      const ecnMismatchErr = new Error(`POS-014 Pre-condition failed: Original ECN (${originalEcn}) does not match Recovery ECN (${recoveryEcn}). Aborting recovery.`);
+      console.error(`[NetsService] [POS-014] ${ecnMismatchErr.message}`);
+      throw ecnMismatchErr;
+    }
+
+    this.isRecoveryInProgress = true;
+    const initialDelay = this.config.recoveryInitialDelayMs !== undefined ? this.config.recoveryInitialDelayMs : 4000;
+    const startTime = Date.now();
+
+    const recoveryAudit = {
+      ecn: originalEcn,
+      originalEcn,
+      recoveryEcn,
+      ecrRef: refNum,
+      amount,
+      amountStr,
+      flowName,
+      txnType,
+      recoveryCommandType: txnType === 'I0' ? 'FC I0 (Same ECN)' : 'FC 30 (Same ECN)',
+      initialErrorCode: initialError?.code || 'UNKNOWN',
+      initialErrorMessage: initialError?.message || '',
+      startedAt: new Date().toISOString(),
+      recoveryAttempts: [],
+      status: 'RECOVERY_IN_PROGRESS',
+    };
+
+    console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Initiating Same-ECN Recovery for ECN=${originalEcn} (Ref=${refNum}, Amt=${amount}). Waiting ${initialDelay}ms for link stabilization...`);
+
+    if (onProgress) {
+      onProgress({
+        status: 'recovery_wait',
+        message: `Waiting for terminal connection to stabilize (${initialDelay / 1000}s)...`,
+      });
+    }
+
+    if (initialDelay > 0) {
+      await this._delay(initialDelay);
+    }
+
+    if (onProgress) {
+      onProgress({
+        status: 'recovering',
+        message: `Recovering transaction using original ECN ${originalEcn}...`,
+      });
+    }
+
+    // Build frame with exact original parameters
+    let frame;
+    const isCreditCard = txnType === 'I0';
+    if (isCreditCard) {
+      frame = buildNetsFrame({
+        ecn: originalEcn,
+        functionCode: 'I0',
+        versionCode: '01',
+        fields: [
+          { code: '40', value: amountStr },
+          { code: 'HD', value: refNum },
+        ],
+      });
+    } else {
+      const refCode = (this.config.ecrRefFieldCode || 'HD').toUpperCase().slice(0, 2);
+      frame = buildNetsFrame({
+        ecn: originalEcn,
+        functionCode: '30',
+        versionCode: '01',
+        fields: [
+          { code: 'T2', value: txnType || '01' },
+          { code: '40', value: amountStr },
+          { code: refCode, value: refNum },
+        ],
+      });
+    }
+
+    const txHex = frame.toString('hex').toUpperCase();
+    console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Dispatched: Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
+    console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Raw Hex (${frame.length} bytes): ${txHex}`);
+
+    let recoveryRes = null;
+    let recoveryErr = null;
+
+    try {
+      recoveryRes = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+        isQr: txnType === '04',
+        txnType: txnType || '01',
+        flowName,
+      });
+    } catch (err) {
+      recoveryErr = err;
+      console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery attempt socket/transport error: ${err.message}`);
+    } finally {
+      this.isRecoveryInProgress = false;
+    }
+
+    const duration = Date.now() - startTime;
+
+    if (recoveryRes && recoveryRes.parsed) {
+      const rxHex = recoveryRes.rawHex ? recoveryRes.rawHex.toUpperCase() : '';
+      const responseCode = recoveryRes.parsed.responseCode;
+      const isApproved = recoveryRes.parsed.isApproved;
+
+      console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery RX received (took ${duration}ms, RC=${responseCode}, isApproved=${isApproved}): ${sanitizeRawHex(rxHex)}`);
+
+      if (isApproved) {
+        console.log(`[NetsService] [POS-014] [${flowName}] Transaction conclusively recovered and approved with same ECN ${originalEcn}!`);
+
+        // Clear only this matching unresolved record from persistence
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn || t.ecrRef === refNum);
+        if (unresIdx >= 0) {
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        }
+
+        const approvedResult = {
+          ecn: originalEcn,
+          recoveryEcn,
+          isApproved: true,
+          recovered: true,
+          recoveryMethod: 'SAME_ECN',
+          paymentType: flowName,
+          txnType: txnType || '01',
+          functionCode: isCreditCard ? 'I0' : '30',
+          approvalReason: `Approved (Conclusively recovered via same ECN retransmission for ${flowName})`,
+          responseCode: recoveryRes.parsed.responseCode,
+          hostResponseCode: recoveryRes.parsed.hostResponseCode,
+          responseDescription: recoveryRes.parsed.responseDescription,
+          approvalCode: recoveryRes.parsed.approvalCode || recoveryRes.parsed.fields['01'] || '',
+          stan: recoveryRes.parsed.fields['65'] || recoveryRes.parsed.fields['30'] || '',
+          rrn: recoveryRes.parsed.fields['D3'] || '',
+          merchantId: recoveryRes.parsed.fields['D1'] || '',
+          terminalId: recoveryRes.parsed.fields['16'] || '',
+          cardLabel: recoveryRes.parsed.fields['L7'] || recoveryRes.parsed.fields['D8'] || recoveryRes.parsed.fields['D7'] || '',
+          receiptData: recoveryRes.parsed.fields['RP'] || '',
+          date: recoveryRes.parsed.fields['03'] || '',
+          time: recoveryRes.parsed.fields['04'] || '',
+          amount: amount,
+          ecrRef: refNum,
+          fields: recoveryRes.parsed.fields,
+          rawHex: recoveryRes.rawHex,
+          duration,
+        };
+
+        this.lastTransaction = approvedResult;
+        this.recordAuditHistory({
+          ...approvedResult,
+          status: 'RECOVERED_APPROVED',
+          txHex,
+          rxHex,
+        });
+
+        return approvedResult;
+      }
+
+      // If terminal returns confirmed cancellation (RC=XX)
+      if (responseCode === 'XX') {
+        console.warn(`[NetsService] [POS-014] [${flowName}] Same ECN recovery confirmed transaction cancelled by user on terminal (RC=XX). Marking CANCELLED.`);
+        const unresList = this.loadUnresolvedTransactions();
+        const unresIdx = unresList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn);
+        if (unresIdx >= 0) {
+          unresList.splice(unresIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        }
+
+        const cancelledResult = {
+          ecn: originalEcn,
+          recoveryEcn,
+          isApproved: false,
+          recovered: true,
+          recoveryMethod: 'SAME_ECN',
+          paymentType: flowName,
+          txnType: txnType || '01',
+          functionCode: isCreditCard ? 'I0' : '30',
+          approvalReason: 'Transaction Cancelled on Terminal',
+          responseCode: 'XX',
+          responseDescription: recoveryRes.parsed.responseDescription || 'Transaction Cancelled',
+          amount,
+          ecrRef: refNum,
+          duration,
+          rawHex: recoveryRes.rawHex,
+        };
+
+        this.lastTransaction = cancelledResult;
+        this.recordAuditHistory({
+          ...cancelledResult,
+          status: 'CANCELLED',
+          txHex,
+          rxHex,
+        });
+
+        return cancelledResult;
+      }
+
+      // Other non-approved response code (e.g. decline)
+      console.warn(`[NetsService] [POS-014] [${flowName}] Same ECN recovery returned terminal response code ${responseCode} (${recoveryRes.parsed.responseDescription}). Marking DECLINED.`);
+      const declinedResult = {
+        ecn: originalEcn,
+        recoveryEcn,
+        isApproved: false,
+        recovered: true,
+        recoveryMethod: 'SAME_ECN',
+        paymentType: flowName,
+        txnType: txnType || '01',
+        functionCode: isCreditCard ? 'I0' : '30',
+        approvalReason: recoveryRes.parsed.approvalReason || `Declined (${responseCode})`,
+        responseCode,
+        responseDescription: recoveryRes.parsed.responseDescription,
+        amount,
+        ecrRef: refNum,
+        duration,
+        rawHex: recoveryRes.rawHex,
+      };
+
+      this.lastTransaction = declinedResult;
+      this.recordAuditHistory({
+        ...declinedResult,
+        status: 'DECLINED',
+        txHex,
+        rxHex,
+      });
+
+      return declinedResult;
+    }
+
+    // Transport error during same ECN recovery: State remains UNKNOWN / UNRESOLVED
+    console.error(`[NetsService] [POS-014] [${flowName}] Same ECN recovery failed with transport error (${recoveryErr?.message}). Outcome remains UNKNOWN.`);
+
+    recoveryAudit.status = 'UNRESOLVED';
+    recoveryAudit.unresolvedReason = `Same ECN recovery failed (${recoveryErr?.message}). Terminal status could not be verified. Outcome is UNKNOWN.`;
+    recoveryAudit.lastTransportError = {
+      code: recoveryErr?.code || 'ETIMEDOUT',
+      message: recoveryErr?.message || 'Terminal communication timed out during same ECN recovery',
+    };
+    recoveryAudit.duration = duration;
+
+    this.saveUnresolvedTransaction(recoveryAudit);
+
+    const recoveryExhaustedErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${originalEcn}). Terminal recovery attempt failed. Manual reconciliation required. Do NOT recharge customer.`);
+    recoveryExhaustedErr.code = 'ERECONCILIATIONREQUIRED';
+    recoveryExhaustedErr.originalEcn = originalEcn;
+    recoveryExhaustedErr.recoveryEcn = recoveryEcn;
+    recoveryExhaustedErr.lastError = recoveryErr;
+    recoveryExhaustedErr.unresolved = recoveryAudit;
+    throw recoveryExhaustedErr;
+  }
+
+  /**
    * POS-013: Bounded LAN Recovery and FC 56 Retry Handler
    * Encapsulates safe recovery with bounded backoff, retry loop for transport errors,
    * fresh atomic ECNs per attempt, and strict reconciliation matching.
@@ -1522,14 +1798,28 @@ class NetsService {
 
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
-      if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
+      // POS-014 vs POS-013 Recovery Strategy Selection:
+      // When autoRetryWithSameEcn is true, POS-014 same-ECN retransmission is executed (reusing original ECN).
+      // Otherwise, if lastApprovedQueryOnTimeout is enabled, POS-013 FC 56 inquiry recovery is executed.
+      if (isUncertainOutcome && this.config.autoRetryWithSameEcn) {
+        return await this._recoverWithSameEcn({
+          originalEcn: ecn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: 'I0',
+          initialError: err,
+          onProgress,
+        });
+      } else if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
         return await this._recoverWithLastApproved({
           originalEcn: ecn,
           refNum,
           amount,
           amountStr,
           flowName,
-          txnType: txnType || '01',
+          txnType: 'I0',
           initialError: err,
           onProgress,
         });
@@ -1665,12 +1955,23 @@ class NetsService {
         throw new Error('Terminal is currently busy. Please wait and try again.');
       }
 
-      // Handle Timeout / Uncertain outcome: Rigorous FC 56 Recovery
+      // Handle Timeout / Uncertain outcome: POS-014 Same ECN Recovery vs POS-013 FC 56 Recovery
       // Trigger recovery whenever the request was dispatched and outcome became uncertain
       // (e.g. response timeout, socket reset/close, or parsing failure)
       const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
 
-      if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
+      if (isUncertainOutcome && this.config.autoRetryWithSameEcn) {
+        return await this._recoverWithSameEcn({
+          originalEcn: ecn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType,
+          initialError: err,
+          onProgress,
+        });
+      } else if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
         return await this._recoverWithLastApproved({
           originalEcn: ecn,
           refNum,
