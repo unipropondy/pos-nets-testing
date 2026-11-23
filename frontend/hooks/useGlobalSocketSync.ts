@@ -465,11 +465,13 @@ export function useGlobalSocketSync() {
           ? "success"
           : (payload.status === "CANCELLED" || payload.status === "cancelled")
             ? "cancelled"
-            : (payload.status === "TIMEOUT" || payload.status === "timeout" || payload.status === "UNKNOWN" || payload.status === "unknown" || payload.status === "FAILED" || payload.status === "failed")
-              ? "failed"
-              : (payload.status === "WAITING_CARD" || payload.status === "PROCESSING" || payload.status === "processing")
-                ? "processing"
-                : "idle",
+            : (payload.status === "RECONCILING" || payload.status === "reconciling")
+              ? "reconciling"
+              : (payload.status === "TIMEOUT" || payload.status === "timeout" || payload.status === "UNKNOWN" || payload.status === "unknown" || payload.status === "FAILED" || payload.status === "failed")
+                ? "failed"
+                : (payload.status === "WAITING_CARD" || payload.status === "PROCESSING" || payload.status === "processing")
+                  ? "processing"
+                  : "idle",
         message: payload.message || "",
         method: payload.paymentMethod || payload.method || "",
         total: payload.amount || payload.total || 0,
