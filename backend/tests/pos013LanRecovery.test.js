@@ -175,9 +175,9 @@ function cleanupTestState() {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 3: Non-matching previous approved transaction is NOT claimed cancelled
+  // Test 3: Non-matching previous approved FC 56 marks payment UNSUCCESSFUL per POS-013 spec
   // ---------------------------------------------------------------------------
-  await runAsyncTest('Non-matching previous approved FC 56 marks outcome UNKNOWN and does not auto-cancel', async () => {
+  await runAsyncTest('Non-matching previous approved FC 56 marks original payment UNSUCCESSFUL', async () => {
     cleanupTestState();
     const service = new NetsService();
     service.config.recoveryInitialDelayMs = 10;
@@ -208,35 +208,26 @@ function cleanupTestState() {
     initialErr.code = 'ECONNRESET';
     initialErr.requestDispatched = true;
 
-    let caughtErr = null;
-    try {
-      await service._recoverWithLastApproved({
-        originalEcn: '000000016663',
-        refNum: 'POS_CURRENT_REF',
-        amount: 10.00,
-        amountStr: '000000001000',
-        flowName: 'NETS Card',
-        txnType: '01',
-        initialError: initialErr,
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
+    const result = await service._recoverWithLastApproved({
+      originalEcn: '000000016663',
+      refNum: 'POS_CURRENT_REF',
+      amount: 10.00,
+      amountStr: '000000001000',
+      flowName: 'NETS Card',
+      txnType: '01',
+      initialError: initialErr,
+    });
 
-    assert.ok(caughtErr, 'Expected ERECONCILIATIONREQUIRED error');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-    assert.strictEqual(caughtErr.originalEcn, '000000016663');
-    assert.strictEqual(caughtErr.unresolved.status, 'UNRESOLVED');
-    assert.ok(!caughtErr.message.includes('declined'), 'Must not claim declined');
-    assert.ok(!caughtErr.message.includes('cancelled'), 'Must not claim cancelled');
-    assert.ok(caughtErr.message.includes('Manual reconciliation required'), 'Must instruct manual reconciliation');
+    assert.strictEqual(result.isApproved, false, 'Payment must be marked not approved');
+    assert.strictEqual(result.ecn, '000000016663', 'Original ECN must be preserved');
+    assert.strictEqual(result.responseCode, 'XX', 'Unsuccessful status represented by responseCode XX');
+    assert.ok(result.responseDescription.includes('Unsuccessful'), 'Description must indicate unsuccessful');
 
-    // Verify unresolved transaction is locked and persisted
-    const activeUnresolved = service.getUnresolvedTransaction();
-    assert.ok(activeUnresolved, 'Unresolved transaction must be active');
-    assert.strictEqual(activeUnresolved.originalEcn, '000000016663');
-    assert.strictEqual(activeUnresolved.ecrRef, 'POS_CURRENT_REF');
-    assert.strictEqual(fs.existsSync(UNRESOLVED_TEST_PATH), true, 'Unresolved state must be persisted to disk');
+    // Audit history must reflect the unsuccessful result
+    const audit = service.getAuditHistory();
+    assert.ok(audit.length >= 1);
+    assert.strictEqual(audit[0].status, 'UNSUCCESSFUL_CONFIRMED_BY_FC56');
+    assert.strictEqual(audit[0].ecn, '000000016663');
   });
 
   // ---------------------------------------------------------------------------
@@ -558,8 +549,9 @@ function cleanupTestState() {
     // Verify disk contents directly
     const onDiskRaw = fs.readFileSync(UNRESOLVED_TEST_PATH, 'utf8');
     const onDisk = JSON.parse(onDiskRaw);
-    assert.strictEqual(onDisk.ecn, '000000016667');
-    assert.strictEqual(onDisk.originalEcn, '000000016667');
+    const firstRecord = Array.isArray(onDisk) ? onDisk[0] : onDisk;
+    assert.strictEqual(firstRecord.ecn, '000000016667');
+    assert.strictEqual(firstRecord.originalEcn, '000000016667');
   });
 
   // ---------------------------------------------------------------------------
@@ -761,7 +753,202 @@ function cleanupTestState() {
     assert.strictEqual(qrResult.responseCode, '00');
   });
 
+  // ---------------------------------------------------------------------------
+  // Test 14: Multiple unresolved transactions are tracked independently without overwriting
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Multiple unresolved transactions are preserved independently and reconciled individually', async () => {
+    cleanupTestState();
+    const service = new NetsService();
+
+    // 1. Save two distinct unresolved transactions
+    service.saveUnresolvedTransaction({
+      ecn: '000000016699',
+      originalEcn: '000000016699',
+      ecrRef: 'REF_TXN_A',
+      amount: 5.50,
+      amountStr: '000000000550',
+      flowName: 'NETS Card',
+      status: 'UNRESOLVED',
+    });
+
+    service.saveUnresolvedTransaction({
+      ecn: '000000016704',
+      originalEcn: '000000016704',
+      ecrRef: 'REF_TXN_B',
+      amount: 5.00,
+      amountStr: '000000000500',
+      flowName: 'NETS Card',
+      status: 'UNRESOLVED',
+    });
+
+    const list = service.loadUnresolvedTransactions();
+    assert.strictEqual(list.length, 2, 'Both unresolved transactions must be persisted');
+    assert.ok(list.some(t => t.ecn === '000000016699'), 'ECN 000000016699 must exist');
+    assert.ok(list.some(t => t.ecn === '000000016704'), 'ECN 000000016704 must exist');
+
+    // 2. Clear only the specific targetEcn 000000016699 with evidence
+    const clearResult = service.clearUnresolvedTransactionWithEvidence({
+      targetEcn: '000000016699',
+      approvalCode: 'MANUAL_SLIP',
+      reconciliationReason: 'Verified terminal slip',
+    });
+
+    assert.strictEqual(clearResult.success, true);
+    assert.strictEqual(clearResult.clearedTransaction.ecn, '000000016699');
+    assert.strictEqual(clearResult.remainingCount, 1);
+
+    const remainingList = service.loadUnresolvedTransactions();
+    assert.strictEqual(remainingList.length, 1);
+    assert.strictEqual(remainingList[0].ecn, '000000016704', 'Second unresolved transaction remains intact');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 15: Idempotency middleware duplicate request handling & in-flight waiting
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Idempotency middleware returns identical cached response on duplicate request', async () => {
+    const idempotencyMiddleware = require('../middleware/idempotency');
+    const EventEmitter = require('events');
+
+    const testReqId = 'test-idemp-' + Date.now();
+    const reqBody = { amount: 5.00, ecrRef: 'POS_IDEMP_TEST' };
+
+    // Fake Request 1
+    const req1 = {
+      headers: { 'x-request-id': testReqId },
+      method: 'POST',
+      originalUrl: '/api/nets/card-payment',
+      body: reqBody,
+    };
+
+    let res1Output = null;
+    const res1 = new EventEmitter();
+    res1.statusCode = 200;
+    res1._headers = { 'content-type': 'application/json' };
+    res1.getHeaders = () => res1._headers;
+    res1.setHeader = (k, v) => { res1._headers[k] = v; };
+    res1.status = (code) => { res1.statusCode = code; return res1; };
+    res1.send = (b) => { res1Output = b; };
+
+    // Run first request through middleware
+    let nextCalled = false;
+    idempotencyMiddleware(req1, res1, () => {
+      nextCalled = true;
+    });
+    assert.strictEqual(nextCalled, true, 'First request must proceed to route');
+
+    // Simulate route handler completing
+    const responsePayload = JSON.stringify({ success: true, approved: true, approvalCode: 'IDEMP99' });
+    res1.send(responsePayload);
+    assert.strictEqual(res1Output, responsePayload);
+
+    // Fake Request 2 (Duplicate with same request ID and same body)
+    const req2 = {
+      headers: { 'x-request-id': testReqId },
+      method: 'POST',
+      originalUrl: '/api/nets/card-payment',
+      body: reqBody,
+    };
+
+    let res2Output = null;
+    const res2 = new EventEmitter();
+    res2.statusCode = 0;
+    res2._headers = {};
+    res2.getHeaders = () => res2._headers;
+    res2.setHeader = (k, v) => { res2._headers[k] = v; };
+    res2.status = (code) => { res2.statusCode = code; return res2; };
+    res2.send = (b) => { res2Output = b; };
+
+    let next2Called = false;
+    idempotencyMiddleware(req2, res2, () => {
+      next2Called = true;
+    });
+
+    assert.strictEqual(next2Called, false, 'Duplicate request must NOT execute route handler again');
+    assert.strictEqual(res2.statusCode, 200, 'Duplicate request must return cached status');
+    assert.strictEqual(res2Output, responsePayload, 'Duplicate request must return cached response body');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 16: Frontend HTTP disconnect does NOT delete idempotency processing lock,
+  // preventing duplicate terminal dispatch on retry
+  // ---------------------------------------------------------------------------
+  await runAsyncTest('Client disconnect does not clear idempotency lock and prevents duplicate purchase dispatch', async () => {
+    const idempotencyMiddleware = require('../middleware/idempotency');
+    const EventEmitter = require('events');
+
+    const testDisconnectId = 'test-disconnect-' + Date.now();
+    const reqBody = { amount: 10.00, ecrRef: 'POS_DISC_TEST' };
+
+    let terminalDispatchCount = 0;
+
+    // Fake Request 1
+    const req1 = {
+      headers: { 'x-request-id': testDisconnectId },
+      method: 'POST',
+      originalUrl: '/api/nets/card-payment',
+      body: reqBody,
+    };
+
+    const res1 = new EventEmitter();
+    res1.statusCode = 200;
+    res1.writableEnded = false;
+    res1._headers = { 'content-type': 'application/json' };
+    res1.getHeaders = () => res1._headers;
+    res1.setHeader = (k, v) => { res1._headers[k] = v; };
+    res1.status = (code) => { res1.statusCode = code; return res1; };
+    res1.send = (b) => { res1.writableEnded = true; };
+
+    // Request 1 enters middleware and proceeds to slow terminal operation
+    let req1Dispatched = false;
+    idempotencyMiddleware(req1, res1, () => {
+      req1Dispatched = true;
+      terminalDispatchCount++;
+    });
+    assert.strictEqual(req1Dispatched, true);
+    assert.strictEqual(terminalDispatchCount, 1);
+
+    // Simulate Client Disconnect while terminal operation is STILL in-flight:
+    // res emits 'close' before res.send is called
+    res1.emit('close');
+
+    // While backend operation is still in-flight, a duplicate request arrives (e.g. client retried or re-sent)
+    const req2 = {
+      headers: { 'x-request-id': testDisconnectId },
+      method: 'POST',
+      originalUrl: '/api/nets/card-payment',
+      body: reqBody,
+    };
+
+    const res2 = new EventEmitter();
+    res2.statusCode = 0;
+    res2.writableEnded = false;
+    res2._headers = {};
+    res2.getHeaders = () => res2._headers;
+    res2.setHeader = (k, v) => { res2._headers[k] = v; };
+    res2.status = (code) => { res2.statusCode = code; return res2; };
+    let res2Data = null;
+    res2.send = (b) => { res2Data = b; res2.writableEnded = true; };
+
+    let req2DispatchedToTerminal = false;
+    idempotencyMiddleware(req2, res2, () => {
+      req2DispatchedToTerminal = true;
+      terminalDispatchCount++;
+    });
+
+    // CRITICAL ASSERTION: The duplicate request must NOT dispatch another terminal purchase!
+    assert.strictEqual(req2DispatchedToTerminal, false, 'Duplicate request must NOT execute terminal dispatch again after client disconnect');
+    assert.strictEqual(terminalDispatchCount, 1, 'Terminal dispatch count must strictly remain 1');
+
+    // Now simulate original slow terminal operation finally finishing on backend
+    const resolvedPayload = JSON.stringify({ success: true, approved: true, approvalCode: 'RECOV01' });
+    res1.send(resolvedPayload);
+
+    // The waiting duplicate request 2 should receive the resolved response
+    assert.strictEqual(res2.statusCode, 200);
+    assert.strictEqual(res2Data, resolvedPayload);
+  });
+
   cleanupTestState();
-  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (13/13) ===');
+  console.log('\n=== ALL POS-013 LAN RECOVERY TESTS PASSED (16/16) ===');
   process.exit(0);
 })();

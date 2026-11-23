@@ -38,10 +38,26 @@ module.exports = function idempotencyMiddleware(req, res, next) {
 
     if (record.status === 'processing') {
       // If it is still being processed by the server:
-      // For financial operations, wait for the pending request instead of failing hard with 409
+      // For financial operations, wait for the pending request with bounded timeout instead of hanging indefinitely
       if (record.emitter) {
         console.log(`[Idempotency] Awaiting in-flight response for request ID: ${requestId}`);
+        let finished = false;
+        const waitTimeout = setTimeout(() => {
+          if (!finished) {
+            finished = true;
+            console.warn(`[Idempotency] Timed out waiting for in-flight request ID: ${requestId}`);
+            return res.status(504).json({
+              error: "Timed out waiting for original in-flight request to complete. Please check status before retrying.",
+              code: "EIDEMPOTENCY_INFLIGHT_TIMEOUT"
+            });
+          }
+        }, 45000); // 45s bounded wait
+
         return record.emitter.once('done', (savedRecord) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(waitTimeout);
+
           if (!savedRecord || !savedRecord.response) {
             return res.status(500).json({ error: "Original in-flight request terminated unexpectedly." });
           }
@@ -76,7 +92,26 @@ module.exports = function idempotencyMiddleware(req, res, next) {
 
   // Intercept the send method to capture response once it resolves
   const originalSend = res.send;
+  let responseHandled = false;
+
+  // CRITICAL REQUIREMENT: A frontend HTTP disconnect must NOT prematurely delete the
+  // idempotency record while the backend terminal operation is still executing.
+  // The backend execution state and idempotency lock must be retained until the original
+  // operation finishes, so that duplicate or retried requests cannot trigger a second purchase.
+  res.on('close', () => {
+    if (!res.writableEnded && !responseHandled) {
+      console.warn(`[Idempotency] Client HTTP connection closed for request ID: ${requestId}. Backend processing continues to safe terminal outcome.`);
+      const current = processedRequests.get(requestId);
+      if (current && current.status === 'processing') {
+        current.clientDisconnected = true;
+      }
+    }
+  });
+
   res.send = function (body) {
+    if (responseHandled) return originalSend.apply(res, arguments);
+    responseHandled = true;
+
     const savedRecord = {
       status: 'resolved',
       checksum: bodyChecksum,

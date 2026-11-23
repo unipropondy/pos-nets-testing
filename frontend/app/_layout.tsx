@@ -302,7 +302,7 @@ const ANALYTICS_POLICY: NetworkPolicy = {
 const classifyRequest = (url: string): NetworkPolicy => {
   if (!url) return NORMAL_POLICY;
   if (url.includes("/health")) return HEALTH_POLICY;
-  if (url.includes("/yeahpay") || url.includes("yeahpay")) return TERMINAL_POLICY;
+  if (url.includes("/yeahpay") || url.includes("yeahpay") || url.includes("/api/nets/")) return TERMINAL_POLICY;
   if (url.includes("/api/print-jobs/status") || url.includes("/api/print-jobs/bridge-status")) return POLLING_POLICY;
   if (url.includes("/api/sales/") || url.includes("/api/reports/")) return ANALYTICS_POLICY;
 
