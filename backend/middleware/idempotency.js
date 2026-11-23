@@ -48,7 +48,9 @@ module.exports = function idempotencyMiddleware(req, res, next) {
             console.warn(`[Idempotency] Timed out waiting for in-flight request ID: ${requestId}`);
             return res.status(504).json({
               error: "Timed out waiting for original in-flight request to complete. Please check status before retrying.",
-              code: "EIDEMPOTENCY_INFLIGHT_TIMEOUT"
+              code: "EIDEMPOTENCY_INFLIGHT_TIMEOUT",
+              requestId,
+              status: "processing"
             });
           }
         }, 45000); // 45s bounded wait
@@ -59,7 +61,11 @@ module.exports = function idempotencyMiddleware(req, res, next) {
           clearTimeout(waitTimeout);
 
           if (!savedRecord || !savedRecord.response) {
-            return res.status(500).json({ error: "Original in-flight request terminated unexpectedly." });
+            return res.status(500).json({
+              error: "Original in-flight request terminated unexpectedly or client disconnected before terminal outcome.",
+              code: "EINFLIGHT_TERMINATED",
+              requestId
+            });
           }
           res.status(savedRecord.response.status);
           Object.entries(savedRecord.response.headers || {}).forEach(([key, val]) => {

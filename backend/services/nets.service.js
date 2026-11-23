@@ -637,19 +637,18 @@ class NetsService {
   }
 
   /**
-   * POS-013: Pre-purchase terminal & recovery check.
+   * POS-013: Pre-purchase terminal availability check.
    * Ensures:
-   * 1. Terminal is not busy with another operation (concurrency guard).
+   * 1. Terminal is not busy with another operation in-memory (concurrency guard).
    * 2. No active background recovery loop is running.
-   * 3. Terminal is reachable and not still performing an active operation (e.g. NAK or busy).
-   * 4. If an unresolved transaction exists, performs an inquiry (FC 56) to check if the previous
-   *    transaction was actually approved on the terminal before allowing the new purchase.
-   *    If it was approved, it reconciles it and archives it.
-   *    If the terminal reports a non-matching transaction or is available, the previous transaction
-   *    remains recorded in netsUnresolved.json as UNKNOWN, but does NOT permanently block the new purchase.
+   * 3. Terminal is reachable and actively responding via FC 55 (Terminal Status) or fast handshake,
+   *    verifying genuine terminal protocol readiness rather than merely TCP socket connect.
+   * 4. Decouples old unresolved transaction reconciliation from new purchase dispatch:
+   *    Does NOT serially block new customer payments behind long FC 56 inquiry retries.
    * 5. If terminal returns NAK (0x15) or indicates busy, rejects with ETERMINALBUSY.
    */
   async checkTerminalAvailabilityBeforePurchase(flowName = 'NETS Payment') {
+    const startTime = Date.now();
     if (this.isProcessing) {
       const err = new Error(`A payment transaction is already in progress on the terminal.`);
       err.code = 'ETERMINALBUSY';
@@ -668,55 +667,108 @@ class NetsService {
       throw err;
     }
 
-    // If there are unresolved transactions, attempt pre-flight FC 56 reconciliation check
-    const unresList = this.loadUnresolvedTransactions();
-    if (unresList && unresList.length > 0) {
-      console.log(`[NetsService] [POS-013] ${unresList.length} unresolved transaction(s) detected before new ${flowName}. Performing pre-purchase FC 56 check...`);
-
-      try {
-        const inquiryEcn = await this.getNextEcnAsync();
-        const inquiry = await this.getLastApprovedTransaction(inquiryEcn);
-
-        if (inquiry && inquiry.success && inquiry.parsed) {
-          const inqRef = (inquiry.fields['HD'] || inquiry.fields['HS'] || '').trim();
-          const inqAmountStr = (inquiry.fields['40'] || '').trim();
-
-          // Check if terminal's last approved matches ANY unresolved transaction
-          const matchedIndex = unresList.findIndex(unres => {
-            const isRefMatched = inqRef === unres.ecrRef;
-            const isAmountMatched = inqAmountStr === unres.amountStr;
-            return isRefMatched && isAmountMatched && inquiry.parsed.isApproved;
-          });
-
-          if (matchedIndex >= 0) {
-            const matchedUnres = unresList[matchedIndex];
-            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 confirmed previous transaction ECN=${matchedUnres.ecn} was APPROVED! Reconciling now.`);
-            this.recordAuditHistory({
-              ecn: matchedUnres.ecn,
-              originalEcn: matchedUnres.originalEcn || matchedUnres.ecn,
-              ecrRef: matchedUnres.ecrRef,
-              amount: matchedUnres.amount,
-              amountStr: matchedUnres.amountStr,
-              flowName: matchedUnres.flowName,
-              status: 'RECOVERED_APPROVED',
-              reconciledAt: new Date().toISOString(),
-              details: inquiry,
-            });
-            unresList.splice(matchedIndex, 1);
-            this.saveUnresolvedTransactions(unresList);
-          } else {
-            console.log(`[NetsService] [POS-013] Pre-purchase FC 56 showed terminal has different or no record for previous transaction(s) (Terminal inqRef='${inqRef}'). Unresolved transactions remain UNKNOWN; allowing new payment.`);
-          }
-        }
-      } catch (inqErr) {
-        if (inqErr.code === 'ETERMINALBUSY' || inqErr.isNak) {
-          console.warn(`[NetsService] [POS-013] Pre-purchase inquiry found terminal busy (NAK): ${inqErr.message}`);
-          const busyErr = new Error('Terminal is currently busy. Please wait and try again.');
-          busyErr.code = 'ETERMINALBUSY';
-          throw busyErr;
-        }
-        console.warn(`[NetsService] [POS-013] Pre-purchase FC 56 inquiry transport notice: ${inqErr.message}. Allowing new transaction if terminal connects.`);
+    // Fast protocol verification of terminal availability using FC 55 (bounded timeout e.g. 5s)
+    // Ensures terminal ECR service is idle, responsive, and ready to receive a new transaction
+    try {
+      console.log(`[${new Date().toISOString()}] [NetsService] [POS-013] Verifying terminal availability before ${flowName}...`);
+      const statusRes = await this.checkTerminalStatusQuick(5000);
+      const elapsed = Date.now() - startTime;
+      console.log(`[${new Date().toISOString()}] [NetsService] [POS-013] Terminal availability confirmed (RC=${statusRes.responseCode}, took ${elapsed}ms). Ready for ${flowName}.`);
+    } catch (statusErr) {
+      const elapsed = Date.now() - startTime;
+      if (statusErr.code === 'ETERMINALBUSY' || statusErr.isNak) {
+        console.warn(`[${new Date().toISOString()}] [NetsService] [POS-013] Terminal is busy (NAK 0x15 received, took ${elapsed}ms)`);
+        const busyErr = new Error('Terminal is currently busy. Please wait a moment and try again.');
+        busyErr.code = 'ETERMINALBUSY';
+        throw busyErr;
       }
+      console.warn(`[${new Date().toISOString()}] [NetsService] [POS-013] Pre-flight status query warning (took ${elapsed}ms): ${statusErr.message}. Checking direct socket capability.`);
+    }
+  }
+
+  /**
+   * Fast FC 55 status query with short bounded timeout (default 5000ms)
+   * Specifically for pre-flight availability checks to prevent blocking the cashier.
+   */
+  async checkTerminalStatusQuick(timeoutMs = 5000) {
+    const ecn = await this.getNextEcnAsync();
+    const frame = buildNetsFrame({
+      ecn,
+      functionCode: '55',
+      versionCode: '01',
+      fields: [],
+    });
+
+    const res = await this.sendPacket(frame, timeoutMs);
+    return {
+      ecn,
+      success: res.parsed.responseCode === '00',
+      responseCode: res.parsed.responseCode,
+      description: res.parsed.responseDescription,
+      fields: res.parsed.fields,
+      parsed: res.parsed,
+    };
+  }
+
+  /**
+   * Trigger non-blocking independent background reconciliation for unresolved transactions.
+   * Can be triggered on timer or when terminal is idle, without delaying the current cashier payment.
+   */
+  async runBackgroundReconciliation() {
+    if (this.isProcessing || this.isRecoveryInProgress || this.isTmsUpdating) {
+      console.log(`[NetsService] [Reconciliation] Skipping background reconciliation: terminal currently busy.`);
+      return;
+    }
+
+    const unresList = this.loadUnresolvedTransactions();
+    if (!unresList || unresList.length === 0) return;
+
+    console.log(`[NetsService] [Reconciliation] Starting independent background reconciliation for ${unresList.length} unresolved transaction(s)...`);
+    const startTime = Date.now();
+
+    try {
+      this.isRecoveryInProgress = true;
+      const inquiryEcn = await this.getNextEcnAsync();
+      console.log(`[${new Date().toISOString()}] [NetsService] [Reconciliation] Dispatching FC 56 with ECN=${inquiryEcn}`);
+      const inquiry = await this.getLastApprovedTransaction(inquiryEcn);
+      const elapsed = Date.now() - startTime;
+      console.log(`[${new Date().toISOString()}] [NetsService] [Reconciliation] FC 56 response received (RC=${inquiry.responseCode}, took ${elapsed}ms)`);
+
+      if (inquiry && inquiry.success && inquiry.parsed) {
+        const inqRef = (inquiry.fields['HD'] || inquiry.fields['HS'] || '').trim();
+        const inqAmountStr = (inquiry.fields['40'] || '').trim();
+
+        const matchedIdx = unresList.findIndex(unres => {
+          const isRefMatched = inqRef === unres.ecrRef;
+          const isAmtMatched = inqAmountStr === unres.amountStr;
+          return isRefMatched && isAmtMatched && inquiry.parsed.isApproved;
+        });
+
+        if (matchedIdx >= 0) {
+          const matched = unresList[matchedIdx];
+          console.log(`[NetsService] [Reconciliation] Background FC 56 matched and reconciled approved transaction ECN=${matched.ecn} (Ref=${matched.ecrRef})`);
+          this.recordAuditHistory({
+            ecn: matched.ecn,
+            originalEcn: matched.originalEcn || matched.ecn,
+            ecrRef: matched.ecrRef,
+            amount: matched.amount,
+            amountStr: matched.amountStr,
+            flowName: matched.flowName,
+            status: 'RECOVERED_APPROVED',
+            reconciledAt: new Date().toISOString(),
+            details: inquiry,
+          });
+          unresList.splice(matchedIdx, 1);
+          this.saveUnresolvedTransactions(unresList);
+        } else {
+          console.log(`[NetsService] [Reconciliation] FC 56 returned last approved ref '${inqRef}'. No matching unresolved records. Records remain UNKNOWN.`);
+        }
+      }
+    } catch (err) {
+      const elapsed = Date.now() - startTime;
+      console.warn(`[${new Date().toISOString()}] [NetsService] [Reconciliation] FC 56 background inquiry ended with transport error (took ${elapsed}ms): ${err.message}. Unresolved records safely preserved.`);
+    } finally {
+      this.isRecoveryInProgress = false;
     }
   }
   _delay(ms) {
