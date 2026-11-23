@@ -4,8 +4,8 @@
   "financialTimeoutMs": 120000,
   "adminTimeoutMs": 35000,
   "connectionTimeoutMs": 10000,
-  "merchantId": "",
-  "terminalId": "",
+  "merchantId": "111000023560",
+  "terminalId": "20035923",
   "ecrRefFieldCode": "HD",
   "autoRetryWithSameEcn": true,
   "lastApprovedQueryOnTimeout": true
