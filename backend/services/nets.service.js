@@ -93,6 +93,11 @@ class NetsService {
       console.error('[NetsService] Error loading config:', err.message);
     }
     // Default UAT / LAN settings
+        // Ensure config from file has valid numeric financialTimeoutMs of at least 120000ms
+    if (cfg && cfg.financialTimeoutMs && (typeof cfg.financialTimeoutMs !== 'number' || cfg.financialTimeoutMs < 120000)) {
+      console.warn('[NetsService] [CONFIG WARNING] Loaded financialTimeoutMs was below required 120000ms. Overriding to 120000ms.');
+      cfg.financialTimeoutMs = 120000;
+    }
     const merged = {
       terminalIp: '192.168.9.38',
       terminalPort: 7500,
@@ -780,43 +785,69 @@ class NetsService {
     // Execute POS-014 recovery for the unresolved transaction
     let recoveryResult;
     try {
-      if (this.config.autoRetryWithSameEcn) {
-        recoveryResult = await this._recoverWithSameEcn({
-          originalEcn,
-          refNum,
-          amount,
-          amountStr,
-          flowName,
-          txnType,
-          initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
-          onProgress,
-          context: {
-            ...context,
-            requestId,
-            triggerSource,
-          },
-        });
-      } else if (this.config.lastApprovedQueryOnTimeout) {
-        recoveryResult = await this._recoverWithLastApproved({
-          originalEcn,
-          refNum,
-          amount,
-          amountStr,
-          flowName,
-          txnType,
-          initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
-          onProgress,
-          context: {
-            ...context,
-            requestId,
-            triggerSource,
-          },
-        });
-      } else {
-        const blockedErr = new Error(`Unresolved transaction pending (ECN=${originalEcn}). Recovery is disabled in configuration. Manual resolution required.`);
-        blockedErr.code = 'ERECONCILIATIONREQUIRED';
-        blockedErr.originalEcn = originalEcn;
-        throw blockedErr;
+      try {
+        if (this.config.autoRetryWithSameEcn) {
+          recoveryResult = await this._recoverWithSameEcn({
+            originalEcn,
+            refNum,
+            amount,
+            amountStr,
+            flowName,
+            txnType,
+            initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
+            onProgress,
+            context: {
+              ...context,
+              requestId,
+              triggerSource,
+            },
+          });
+        }
+      } catch (sameEcnErr) {
+        console.warn('[' + new Date().toISOString() + '] [NetsService] [POS-014] Same-ECN FC30 recovery did not receive terminal response (' + sameEcnErr.message + '). Querying terminal via FC 56 (Last Approved Transaction)...');
+        if (this.config.lastApprovedQueryOnTimeout) {
+          recoveryResult = await this._recoverWithLastApproved({
+            originalEcn,
+            refNum,
+            amount,
+            amountStr,
+            flowName,
+            txnType,
+            initialError: sameEcnErr,
+            onProgress,
+            context: {
+              ...context,
+              requestId,
+              triggerSource,
+            },
+          });
+        } else {
+          throw sameEcnErr;
+        }
+      }
+            if (!recoveryResult) {
+        if (this.config.lastApprovedQueryOnTimeout && !this.config.autoRetryWithSameEcn) {
+          recoveryResult = await this._recoverWithLastApproved({
+            originalEcn,
+            refNum,
+            amount,
+            amountStr,
+            flowName,
+            txnType,
+            initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
+            onProgress,
+            context: {
+              ...context,
+              requestId,
+              triggerSource,
+            },
+          });
+        } else if (!this.config.autoRetryWithSameEcn && !this.config.lastApprovedQueryOnTimeout) {
+          const blockedErr = new Error('Unresolved transaction pending (ECN=' + originalEcn + '). Recovery is disabled in configuration. Manual resolution required.');
+          blockedErr.code = 'ERECONCILIATIONREQUIRED';
+          blockedErr.originalEcn = originalEcn;
+          throw blockedErr;
+        }
       }
     } catch (recErr) {
       // If recovery failed or threw ERECONCILIATIONREQUIRED / ETIMEDOUT, block new purchase!
@@ -1197,28 +1228,82 @@ class NetsService {
     }
 
     const txHex = frame.toString('hex').toUpperCase();
-    console.log(`[${new Date().toISOString()}] [RECOVERY_FC30_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}`);
+    const packetType = isCreditCard ? 'FC I0 (Credit Sale Same-ECN)' : `FC 30 (Purchase Same-ECN T2=${txnType || '01'})`;
+    console.log(`[${new Date().toISOString()}] [RECOVERY_FC30_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}, PacketType=${packetType}`);
     console.log(`[${new Date().toISOString()}] [SAME_ECN_RECOVERY_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}`);
     console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Raw Hex (${frame.length} bytes): ${txHex}`);
 
     let recoveryRes = null;
     let recoveryErr = null;
 
+    const retryDelay = this.config.recoveryRetryDelayMs !== undefined ? this.config.recoveryRetryDelayMs : 2000;
+    const maxRetries = this.config.recoveryMaxRetries !== undefined ? this.config.recoveryMaxRetries : 2;
+    const totalAttempts = 1 + maxRetries;
+    const recoveryTimeout = this.config.recoveryTimeoutMs || this.config.financialTimeoutMs || 120000;
+
     try {
-      recoveryRes = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
-        isRecovery: true,
-        isFinancial: true,
-        amount,
-        amountStr,
-        isQr: txnType === '04',
-        txnType: txnType || '01',
-        flowName,
-        ecn: recoveryEcn,
-        ecrRef: refNum,
-      });
-    } catch (err) {
-      recoveryErr = err;
-      console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery attempt socket/transport error: ${err.message}`);
+      for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+        console.log(`[${new Date().toISOString()}] [RECOVERY_ATTEMPT] [${flowName}] Attempt ${attempt}/${totalAttempts}: Dispatched ${packetType} (${frame.length} bytes), ECN=${recoveryEcn}, Ref=${refNum}, Amount=${amount}, Timeout=${recoveryTimeout}ms`);
+        if (onProgress) {
+          onProgress({
+            status: 'recovering',
+            message: `Recovering transaction (Attempt ${attempt}/${totalAttempts}, ${packetType})...`,
+          });
+        }
+
+        try {
+          recoveryRes = await this.sendPacket(frame, recoveryTimeout, onProgress, {
+            isRecovery: true,
+            isFinancial: true,
+            amount,
+            amountStr,
+            isQr: txnType === '04',
+            txnType: txnType || '01',
+            flowName,
+            ecn: recoveryEcn,
+            ecrRef: refNum,
+          });
+
+          recoveryAudit.recoveryAttempts.push({
+            attempt,
+            packetType,
+            recoveryEcn,
+            timestamp: new Date().toISOString(),
+            success: true,
+            responseCode: recoveryRes?.parsed?.responseCode,
+            approvalCode: recoveryRes?.parsed?.approvalCode,
+          });
+
+          // If terminal responded, break out of retry loop to process outcome
+          break;
+        } catch (err) {
+          recoveryErr = err;
+          const errCode = err.code || (err.message && err.message.includes('timed out') ? 'ETIMEDOUT' : 'UNKNOWN');
+          console.warn(`[${new Date().toISOString()}] [RECOVERY_ATTEMPT_FAILED] [${flowName}] Attempt ${attempt}/${totalAttempts} (${packetType}) failed: ${err.message} (code=${errCode})`);
+
+          recoveryAudit.recoveryAttempts.push({
+            attempt,
+            packetType,
+            recoveryEcn,
+            timestamp: new Date().toISOString(),
+            success: false,
+            errorCode: errCode,
+            errorMessage: err.message,
+          });
+
+          const eligibleErrorCodes = ['ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'ESOCKET', 'EUNCERTAIN_SOCKET_CLOSED'];
+          const isEligibleRetry = eligibleErrorCodes.some(c => errCode.includes(c) || err.message.includes(c));
+
+          if (attempt < totalAttempts && isEligibleRetry) {
+            console.log(`[${new Date().toISOString()}] [RECOVERY_RETRY_WAIT] Retrying same-ECN recovery in ${retryDelay}ms (Attempt ${attempt + 1}/${totalAttempts})...`);
+            if (retryDelay > 0) {
+              await this._delay(retryDelay);
+            }
+          } else {
+            break;
+          }
+        }
+      }
     } finally {
       this.isRecoveryInProgress = false;
     }
@@ -1512,9 +1597,14 @@ class NetsService {
     // Step 3: Evaluate Inquiry Outcome
     if (inquiry) {
       const inqRef = (inquiry.fields['HS'] || inquiry.fields['HD'] || '').trim();
-      const isRefMatched = inqRef === refNum.trim();
+      const refNumTrim = refNum.trim();
+      const isRefMatched = inqRef === refNumTrim || 
+                           inqRef.replace(/^0+/, '') === refNumTrim.replace(/^0+/, '') ||
+                           inqRef.endsWith(refNumTrim) || 
+                           refNumTrim.endsWith(inqRef);
       const inqAmountStr = (inquiry.fields['40'] || '').trim();
-      const isAmountMatched = inqAmountStr === amountStr;
+      const isAmountMatched = inqAmountStr === amountStr ||
+                              parseInt(inqAmountStr || '0', 10) === parseInt(amountStr || '0', 10);
 
       // SCENARIO A: Conclusive Approval Match
       if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
