@@ -155,10 +155,24 @@ function cleanupTestState() {
       }
     };
 
-    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
+    // Initial purchase times out and marks UNRESOLVED
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 1.0,
+        ecrRef: '1795440395385',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next cashier action triggers reconciliation
     const res = await service.purchaseCard({
       amount: 1.0,
       ecrRef: '1795440395385',
+      isCashierInitiated: true,
     });
 
     assert.strictEqual(res.isApproved, true);

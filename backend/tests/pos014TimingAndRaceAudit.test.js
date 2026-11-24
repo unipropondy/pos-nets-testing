@@ -151,10 +151,24 @@ function cleanupTestState() {
     let seq = 16771;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout!
+    // Initial purchase times out / disconnects and marks UNRESOLVED
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 10.0,
+        ecrRef: '1795440395401',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next cashier action triggers reconciliation with same ECN
     const res = await service.purchaseCard({
       amount: 10.0,
       ecrRef: '1795440395401',
+      isCashierInitiated: true,
     });
 
     assert.strictEqual(res.isApproved, true);
@@ -230,10 +244,24 @@ function cleanupTestState() {
     let seq = 16772;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
+    // Initial purchase times out and marks UNRESOLVED
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 3.0,
+        ecrRef: '1795440395402',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next cashier action triggers reconciliation
     const res = await service.purchaseCard({
       amount: 3.0,
       ecrRef: '1795440395402',
+      isCashierInitiated: true,
     });
 
     assert.strictEqual(res.isApproved, true);
@@ -425,10 +453,24 @@ function cleanupTestState() {
     let seq = 16777;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
+    // Initial purchase times out and marks UNRESOLVED
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 5.0,
+        ecrRef: '1795440395407',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next cashier action triggers reconciliation
     const res = await service.purchaseCard({
       amount: 5.0,
       ecrRef: '1795440395407',
+      isCashierInitiated: true,
     });
 
     assert.strictEqual(res.isApproved, true);
