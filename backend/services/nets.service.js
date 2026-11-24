@@ -460,6 +460,20 @@ class NetsService {
    * @returns {Promise<{parsed: Object, rawHex: string}>}
    */
   async sendPacket(frameBuffer, timeoutMs = 35000, onProgress = null, context = {}) {
+    // POS-014 Spec Enforcement: If this is a financial transaction or financial recovery,
+    // strictly enforce that timeoutMs cannot be less than configured financialTimeoutMs (120000ms).
+    const isFinancialTxn = context.isFinancial ||
+      context.isRecovery ||
+      ['01', '04', 'I0', '30'].includes(context.txnType) ||
+      ['purchaseCard', 'purchaseQr', 'purchaseCreditCard', '_recoverWithSameEcn'].includes(context.flowName);
+
+    if (isFinancialTxn && this.config.financialTimeoutMs) {
+      if (timeoutMs < this.config.financialTimeoutMs) {
+        console.warn('[' + new Date().toISOString() + '] [NETS Socket Lifecycle] Overriding timeoutMs ' + timeoutMs + 'ms to configured financialTimeoutMs ' + this.config.financialTimeoutMs + 'ms for financial context (' + (context.flowName || 'financial') + ')');
+        timeoutMs = this.config.financialTimeoutMs;
+      }
+    }
+
     const { terminalIp, terminalPort, connectionTimeoutMs } = this.config;
 
     return new Promise((resolve, reject) => {
@@ -474,7 +488,7 @@ class NetsService {
       const timeoutDeadline = startTime + timeoutMs;
       const socketId = `SOCK_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-      console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Init sendPacket: ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}, TxnType=${context.txnType || 'N/A'}, TimeoutMs=${timeoutMs}, StartTime=${startTime}, Deadline=${timeoutDeadline} (${new Date(timeoutDeadline).toISOString()})`);
+      console.log('[' + new Date().toISOString() + '] [NETS Socket Lifecycle] [' + socketId + '] Init sendPacket: Flow=' + (context.flowName || 'N/A') + ', ECN=' + (context.ecn || 'N/A') + ', Ref=' + (context.ecrRef || 'N/A') + ', Amount=' + (context.amount || 'N/A') + ', TxnType=' + (context.txnType || 'N/A') + ', ConfiguredTimeoutMs=' + (this.config.financialTimeoutMs || 'N/A') + ', EffectiveTimeoutMs=' + timeoutMs + ', AbsoluteDeadline=' + new Date(timeoutDeadline).toISOString() + ' (' + timeoutDeadline + ')');
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
@@ -1192,6 +1206,10 @@ class NetsService {
 
     try {
       recoveryRes = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+        isRecovery: true,
+        isFinancial: true,
+        amount,
+        amountStr,
         isQr: txnType === '04',
         txnType: txnType || '01',
         flowName,
@@ -1212,7 +1230,7 @@ class NetsService {
       const responseCode = recoveryRes.parsed.responseCode;
       const isApproved = recoveryRes.parsed.isApproved;
 
-      console.log(`[${new Date().toISOString()}] [RECOVERY_RX] [${flowName}] ECN=${recoveryEcn}, Ref=${refNum}, took=${duration}ms, RC=${responseCode}, isApproved=${isApproved}: ${sanitizeRawHex(rxHex)}`);
+      console.log('[' + new Date().toISOString() + '] [RECOVERY_RX] [' + flowName + '] ECN=' + recoveryEcn + ', Ref=' + refNum + ', Amount=' + amount + ', SocketId=' + (recoveryRes.socketId || 'N/A') + ', TXBytes=' + frame.length + ', RXBytes=' + (rxHex ? rxHex.length / 2 : 0) + ', RC=' + responseCode + ' (' + (recoveryRes.parsed.responseDescription || 'N/A') + '), HostRC=' + (recoveryRes.parsed.hostResponseCode || 'N/A') + ', ApprovalCode=' + (recoveryRes.parsed.approvalCode || 'N/A') + ', isApproved=' + isApproved + ', took=' + duration + 'ms: ' + sanitizeRawHex(rxHex));
 
       if (isApproved) {
         console.log(`[${new Date().toISOString()}] [RECOVERED_APPROVED] [${flowName}] ECN=${originalEcn}, Ref=${refNum}, ApprovalCode=${recoveryRes.parsed.approvalCode || recoveryRes.parsed.fields['01'] || ''}`);
@@ -1304,7 +1322,18 @@ class NetsService {
         return cancelledResult;
       }
 
-      // Other non-approved response code (e.g. decline)
+            // If terminal returns uncertain / busy / timeout response code (e.g. US, TO, TB, CE)
+      if (['US', 'TO', 'TB', 'CE'].includes(responseCode)) {
+        console.warn('[NetsService] [POS-014] [' + flowName + '] Same ECN recovery returned uncertain status code ' + responseCode + ' (' + (recoveryRes.parsed.responseDescription || 'Uncertain') + '). Transaction remains UNRESOLVED.');
+        const uncertainErr = new Error('Transaction outcome remains uncertain after same-ECN recovery (response code: ' + responseCode + '). Manual reconciliation required.');
+        uncertainErr.code = 'ERECONCILIATIONREQUIRED';
+        uncertainErr.originalEcn = originalEcn;
+        uncertainErr.recoveryEcn = recoveryEcn;
+        uncertainErr.responseCode = responseCode;
+        throw uncertainErr;
+      }
+
+      // Other confirmed non-approved response code (e.g. definitive bank decline: 05, 51, 54, etc.)
       console.warn(`[NetsService] [POS-014] [${flowName}] Same ECN recovery returned terminal response code ${responseCode} (${recoveryRes.parsed.responseDescription}). Marking DECLINED.`);
 
       // Clear matching unresolved record from persistence upon definitive decline
@@ -2249,11 +2278,14 @@ class NetsService {
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
 
       const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+        isFinancial: true,
         isQr: txnType === '04',
         txnType,
         flowName,
         ecn,
         ecrRef: refNum,
+        amount,
+        amountStr,
       });
       this.isProcessing = false;
 

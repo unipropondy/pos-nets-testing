@@ -435,7 +435,7 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       });
     }
 
-    const httpStatus = isBusy ? 429 : isConflict ? 409 : 500;
+    const httpStatus = isBusy ? 429 : (isConflict || isUnknownStatus) ? 409 : 500;
     return res.status(httpStatus).json({
       success: false,
       approved: false,

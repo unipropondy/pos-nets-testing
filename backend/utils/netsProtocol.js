@@ -472,6 +472,7 @@ const NETS_RESPONSE_CODES = {
   'NA': 'Negative Acknowledgment (NAK) Received',
   'TB': 'Terminal Busy',
   'XX': 'Transaction Cancelled by User / Terminal',
+  'US': 'Unsolicited / Unexpected Status (Uncertain)',
 };
 
 function getNetsResponseDescription(code) {
