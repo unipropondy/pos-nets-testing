@@ -1597,6 +1597,9 @@ export default function PaymentScreen() {
           ? 'NETS QR'
           : 'NETS Card';
 
+      const cashierActionToken = `CAT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      console.log(`[${new Date().toISOString()}] [CASHIER_PAYMENT_CLICK] Cashier clicked Pay for ${method}, Amount=${total}, Token=${cashierActionToken}`);
+
       setPaymentStatus("processing");
       setPaymentMessage(promptMsg);
       setProcessing(true);
@@ -1609,6 +1612,8 @@ export default function PaymentScreen() {
         return v.toString(16);
       });
 
+      console.log(`[${new Date().toISOString()}] [FRONTEND_API_REQUEST] Endpoint=${endpoint}, RequestID=${paymentRequestId}, Token=${cashierActionToken}, Source=CASHIER_CLICK, Amount=${total}`);
+
       const fetchPromise = (async () => {
         try {
           const response = await fetch(`${API_URL}${endpoint}`, {
@@ -1616,6 +1621,8 @@ export default function PaymentScreen() {
             headers: {
               'Content-Type': 'application/json',
               'x-request-id': paymentRequestId,
+              'x-trigger-source': 'CASHIER_CLICK',
+              'x-cashier-action': 'true',
               ...(useAuthStore.getState().token ? { 'Authorization': `Bearer ${useAuthStore.getState().token}` } : {}),
             },
             body: JSON.stringify({
@@ -1624,6 +1631,8 @@ export default function PaymentScreen() {
               isQr: isNetsQrMode,
               isCreditCard: isNetsCreditCardMode,
               tableId: context?.tableId || '',
+              isCashierInitiated: true,
+              cashierActionToken,
             }),
           });
 
