@@ -1,6 +1,8 @@
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 const { getPool, poolPromise } = require('../config/db');
 const {
   buildNetsFrame,
@@ -126,6 +128,159 @@ class NetsService {
     }
 
     return merged;
+  }
+
+  /**
+   * Identifies the network interface used to communicate with the Ingenico terminal.
+   * Matches local IPv4 network interfaces against the subnet of terminalIp.
+   * On Windows, also tracks physical adapter names (e.g. Ethernet, Wi-Fi).
+   */
+  getTerminalNetworkInterface() {
+    const terminalIp = this.config.terminalIp || '192.168.0.170';
+    const ipParts = terminalIp.split('.');
+    const subnetPrefix3 = ipParts.slice(0, 3).join('.'); // e.g. '192.168.0'
+    const subnetPrefix2 = ipParts.slice(0, 2).join('.'); // e.g. '192.168'
+
+    const ifaces = os.networkInterfaces();
+    let bestMatch = null;
+
+    // Check for exact /24 subnet match
+    for (const [name, addrs] of Object.entries(ifaces)) {
+      if (!Array.isArray(addrs)) continue;
+      for (const a of addrs) {
+        if (a.family === 'IPv4' && !a.internal) {
+          if (a.address.startsWith(subnetPrefix3)) {
+            return {
+              name,
+              ip: a.address,
+              netmask: a.netmask,
+              mac: a.mac,
+              subnet: subnetPrefix3,
+            };
+          } else if (a.address.startsWith(subnetPrefix2) && !bestMatch) {
+            bestMatch = {
+              name,
+              ip: a.address,
+              netmask: a.netmask,
+              mac: a.mac,
+              subnet: subnetPrefix2,
+            };
+          }
+        }
+      }
+    }
+
+    if (bestMatch) return bestMatch;
+
+    // If no subnet match found, fallback to first non-internal IPv4 interface or default Ethernet/Wi-Fi
+    for (const [name, addrs] of Object.entries(ifaces)) {
+      if (!Array.isArray(addrs)) continue;
+      for (const a of addrs) {
+        if (a.family === 'IPv4' && !a.internal) {
+          return {
+            name,
+            ip: a.address,
+            netmask: a.netmask,
+            mac: a.mac,
+            subnet: 'default',
+          };
+        }
+      }
+    }
+
+    return { name: 'Ethernet', ip: 'unknown', netmask: 'unknown', mac: 'unknown', subnet: 'unknown' };
+  }
+
+  /**
+   * Starts real-time physical link-state monitoring during an in-flight financial payment.
+   * Returns a linkController with:
+   * - isDisconnectObserved(): boolean
+   * - stop(): function
+   * - getDisconnectDetails(): Object
+   */
+  startPaymentLinkMonitor({ ecn, ecrRef, requestId, adapterName, onDisconnectObserved }) {
+    const targetAdapter = adapterName || this.getTerminalNetworkInterface().name;
+    let disconnectObserved = false;
+    let disconnectEvent = null;
+    let isStopped = false;
+
+    console.log(`[${new Date().toISOString()}] [LINK_MONITOR_START] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, TargetAdapter=${targetAdapter}`);
+
+    // Initial state check
+    const checkState = () => {
+      try {
+        const ifaces = os.networkInterfaces();
+        const activeAddrs = ifaces[targetAdapter];
+        // If the adapter is unplugged or down, activeAddrs will either be undefined or have no IPv4 address
+        const hasIpv4 = Array.isArray(activeAddrs) && activeAddrs.some(a => a.family === 'IPv4' && !a.internal);
+        return { isUp: hasIpv4, activeAddrs };
+      } catch (err) {
+        return { isUp: false, error: err.message };
+      }
+    };
+
+    let lastKnownUp = checkState().isUp;
+
+    const intervalTimer = setInterval(() => {
+      if (isStopped) return;
+      const { isUp } = checkState();
+
+      if (lastKnownUp && !isUp) {
+        // Physical link down detected!
+        lastKnownUp = false;
+        if (!disconnectObserved) {
+          disconnectObserved = true;
+          disconnectEvent = {
+            timestamp: new Date().toISOString(),
+            adapter: targetAdapter,
+            ecn,
+            ecrRef,
+            requestId,
+          };
+          console.error(`[${new Date().toISOString()}] [NETWORK_LINK_DOWN] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Adapter=${targetAdapter}: Physical link-down / disconnect detected!`);
+          console.error(`[${new Date().toISOString()}] [PAYMENT_DISCONNECT_LATCHED] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Adapter=${targetAdapter}: Permanent disconnectObserved flag latched true.`);
+          if (onDisconnectObserved) {
+            try { onDisconnectObserved(disconnectEvent); } catch (_) {}
+          }
+        }
+      } else if (!lastKnownUp && isUp) {
+        // Link up detected (reconnection)
+        lastKnownUp = true;
+        console.warn(`[${new Date().toISOString()}] [NETWORK_LINK_UP] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Adapter=${targetAdapter}: Physical link-up / reconnect detected. Preserving latched disconnectObserved=${disconnectObserved}. Automatic recovery is BLOCKED.`);
+      }
+    }, 250); // High-frequency 250ms polling
+
+    return {
+      get isDisconnectObserved() {
+        return disconnectObserved;
+      },
+      setDisconnectObserved(val, reason = 'EXTERNAL_SIGNAL') {
+        if (!disconnectObserved && val) {
+          disconnectObserved = true;
+          disconnectEvent = {
+            timestamp: new Date().toISOString(),
+            adapter: targetAdapter,
+            ecn,
+            ecrRef,
+            requestId,
+            reason,
+          };
+          console.error(`[${new Date().toISOString()}] [NETWORK_LINK_DOWN] [${reason}] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Adapter=${targetAdapter}: Link-down detected!`);
+          console.error(`[${new Date().toISOString()}] [PAYMENT_DISCONNECT_LATCHED] [${reason}] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Adapter=${targetAdapter}: Permanent disconnectObserved flag latched true.`);
+          if (onDisconnectObserved) {
+            try { onDisconnectObserved(disconnectEvent); } catch (_) {}
+          }
+        }
+      },
+      getDisconnectDetails() {
+        return disconnectEvent;
+      },
+      stop() {
+        isStopped = true;
+        clearInterval(intervalTimer);
+        console.log(`[${new Date().toISOString()}] [LINK_MONITOR_STOP] Payment RequestID=${requestId}, ECN=${ecn}, Ref=${ecrRef}, Final disconnectObserved=${disconnectObserved}`);
+      },
+    };
   }
 
   saveConfig(newConfig) {
@@ -648,6 +803,9 @@ class NetsService {
 
       socket.on('error', (err) => {
         console.error(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'error' - Code=${err.code || 'NONE'}, Message=${err.message}, duration=${Date.now() - startTime}ms, requestDispatched=${requestDispatched}`);
+        if (context.linkMonitor && requestDispatched) {
+          context.linkMonitor.setDisconnectObserved(true, `SOCKET_ERROR_${err.code || 'UNKNOWN'}`);
+        }
         const sockErr = new Error(`NETS Terminal socket error: ${err.message}`);
         sockErr.code = err.code || 'ESOCKET';
         sockErr.requestDispatched = requestDispatched;
@@ -659,6 +817,9 @@ class NetsService {
         const duration = Date.now() - startTime;
         console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'close' - hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}, duration=${duration}ms, isResolved=${isResolved}`);
         console.log(`[${new Date().toISOString()}] [NETS Socket] Socket closed event: hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}`);
+        if (context.linkMonitor && requestDispatched && !isResolved) {
+          context.linkMonitor.setDisconnectObserved(true, 'SOCKET_CLOSED_PREMATURE');
+        }
         if (!isResolved) {
           if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
             const completeFrame = responseBuffer.slice(0, expectedTotalLength);
@@ -780,6 +941,8 @@ class NetsService {
     const triggerSource = 'CASHIER_SECOND_PAY';
     const cashierActionToken = context.cashierActionToken || 'NONE';
 
+    console.log(`[${new Date().toISOString()}] [CASHIER_SECOND_PAY] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}, Amount=${amount}, ECRRef=${refNum}, ECN=${originalEcn}`);
+    console.log(`[${new Date().toISOString()}] [MANUAL_RECONCILIATION_STARTED] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Initiating reconciliation before allowing new purchase...`);
     console.log(`[${new Date().toISOString()}] [CASHIER_EXPLICIT_PAY_CLICK] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}, Amount=${amount}, ECRRef=${refNum}, ECN=${originalEcn}`);
     console.log(`[${new Date().toISOString()}] [MANUAL_RECONCILIATION_START] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Initiating reconciliation before allowing new purchase...`);
     console.warn(`[${new Date().toISOString()}] [RECONCILIATION_TRIGGER] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
@@ -790,6 +953,51 @@ class NetsService {
         status: 'recovery_wait',
         message: `Previous transaction (ECN ${originalEcn}) requires reconciliation. Verifying terminal status...`,
       });
+    }
+
+    // If lateResponse was preserved after a detected disconnect and was approved, verify/return it
+    if (pending.lateResponse && pending.lateResponse.isApproved) {
+      console.log(`[${new Date().toISOString()}] [RECOVERED_APPROVED] [${flowName}] ECN=${originalEcn}, Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}: Reconciled from preserved late approval (Code=${pending.lateResponse.approvalCode})`);
+      
+      // Clear unresolved record from persistence
+      const currentList = this.loadUnresolvedTransactions();
+      const matchIdx = currentList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn);
+      if (matchIdx >= 0) {
+        currentList.splice(matchIdx, 1);
+        this.saveUnresolvedTransactions(currentList);
+      }
+
+      const recoveredResult = {
+        ecn: originalEcn,
+        recoveryEcn: originalEcn,
+        isApproved: true,
+        recovered: true,
+        recoveryMethod: 'LATE_APPROVAL_RECONCILED',
+        paymentType: flowName,
+        txnType: txnType || '01',
+        functionCode: '30',
+        approvalReason: 'Approved (Reconciled from terminal response after network link recovery)',
+        responseCode: pending.lateResponse.responseCode || '00',
+        approvalCode: pending.lateResponse.approvalCode,
+        stan: pending.lateResponse.stan || '',
+        rrn: pending.lateResponse.rrn || '',
+        amount,
+        ecrRef: refNum,
+        fields: pending.lateResponse.fields || {},
+        rawHex: pending.lateResponse.rawHex || '',
+      };
+
+      this.lastTransaction = recoveredResult;
+      this.recordAuditHistory({
+        ...recoveredResult,
+        status: 'RECOVERED_APPROVED',
+      });
+
+      return {
+        reconciled: true,
+        isApproved: true,
+        result: recoveredResult,
+      };
     }
 
     // Execute POS-014 recovery for the unresolved transaction
@@ -1554,12 +1762,14 @@ class NetsService {
     const eligibleErrorCodes = ['ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'ESOCKET'];
 
     // Step 2: Retry loop (Attempt 1 + up to maxRetries)
+    // Per NETS POS-014 Specification: In reconciliation, reuse the exact original ECN on attempt 1.
+    // If subsequent network retries are needed, fallback to fresh sequential ECN if required.
     const totalAttempts = 1 + maxRetries;
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       let recoveryEcn = null;
       try {
-        recoveryEcn = await this.getNextEcnAsync();
-        console.log(`[NetsService] [POS-013] [${flowName}] FC 56 recovery attempt ${attempt}/${totalAttempts} with fresh ECN=${recoveryEcn}`);
+        recoveryEcn = (attempt === 1 && originalEcn) ? originalEcn : await this.getNextEcnAsync();
+        console.log(`[NetsService] [POS-013] [${flowName}] FC 56 recovery attempt ${attempt}/${totalAttempts} with ECN=${recoveryEcn} (Original=${originalEcn})`);
 
         if (onProgress) {
           onProgress({
@@ -2157,6 +2367,8 @@ class NetsService {
     let amountStr = '';
     let refNum = '';
     const startTime = Date.now();
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    let linkMonitor = null;
 
     try {
       ecn = retrySameEcn || await this.getNextEcnAsync();
@@ -2166,12 +2378,6 @@ class NetsService {
       const rawRef = (ecrRef || `P${Date.now()}`).toString().trim().replace(/[^a-zA-Z0-9]/g, '');
       refNum = rawRef.length >= 13 ? rawRef.slice(-13) : rawRef.padStart(13, '0');
 
-      // Section 4.8.1:
-      // Header: ECN (12 ASC) + Function Code 'I0' + Version '01' + RFU '0' + FS
-      // Mandatory Fields:
-      // - Field 40: Transaction Amount (12-char zero-padded amount in cents)
-      // - Field HD: Enhanced ECR Reference Number (13 characters)
-      // Acquirer selection is automatic via BIN routing: Field 9G is omitted. Field 9Q is omitted.
       const fields = [
         { code: '40', value: amountStr },
         { code: 'HD', value: refNum },
@@ -2187,10 +2393,25 @@ class NetsService {
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Frame Dispatched: ECN=${ecn}, Amount=${amount} (${amountStr}), Function=I0, Field HD=${refNum}`);
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
 
+      // Start physical link monitor for the duration of this credit payment
+      const terminalAdapter = this.getTerminalNetworkInterface();
+      linkMonitor = this.startPaymentLinkMonitor({
+        ecn,
+        ecrRef: refNum,
+        requestId,
+        adapterName: terminalAdapter.name,
+      });
+
       const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
         isQr: false,
         txnType: 'I0',
         flowName,
+        ecn,
+        ecrRef: refNum,
+        amount,
+        amountStr,
+        requestId,
+        linkMonitor,
       });
       this.isProcessing = false;
 
@@ -2229,6 +2450,69 @@ class NetsService {
         rawHex: res.rawHex,
       };
 
+      // Handle Approval Received After a Detected Disconnect
+      const disconnectObserved = Boolean(linkMonitor && linkMonitor.isDisconnectObserved);
+      if (disconnectObserved) {
+        console.warn(`[${new Date().toISOString()}] [LATE_APPROVAL_AFTER_DISCONNECT] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}, Adapter=${terminalAdapter.name}: Physical link disconnect was observed during in-flight credit payment, but terminal returned response (RC=${result.responseCode}, ApprovalCode=${result.approvalCode}).`);
+        console.warn(`[${new Date().toISOString()}] [AUTO_COMPLETION_BLOCKED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Automatic bill completion / save is BLOCKED! Preserving approval details for cashier second Pay click.`);
+
+        // Wait out the remainder of the original financial timeout to enforce deadline
+        const elapsedSinceStart = Date.now() - startTime;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        if (elapsedSinceStart < totalTimeoutTarget) {
+          const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
+          console.log(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_WAITING] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Waiting ${remainingWaitMs}ms to enforce complete ${totalTimeoutTarget}ms financial deadline...`);
+          if (onProgress) {
+            onProgress({
+              status: 'waiting_timeout',
+              message: `Network link changed during payment. Awaiting financial deadline (${Math.round(remainingWaitMs / 1000)}s)...`,
+            });
+          }
+          await this._delay(remainingWaitMs);
+        }
+
+        const totalElapsed = Date.now() - startTime;
+        console.warn(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_REACHED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Configured financial deadline reached after ${totalElapsed}ms.`);
+
+        const unresRecord = {
+          ecn,
+          originalEcn: ecn,
+          ecrRef: refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: 'I0',
+          status: 'UNRESOLVED',
+          disconnectObserved: true,
+          disconnectDetails: linkMonitor.getDisconnectDetails(),
+          unresolvedReason: `Physical network disconnect was detected during credit payment. Terminal responded with ${result.approvalCode ? 'Approval (' + result.approvalCode + ')' : 'RC=' + result.responseCode}. Automatic close blocked. Manual cashier reconciliation required.`,
+          lateResponse: {
+            isApproved: result.isApproved,
+            responseCode: result.responseCode,
+            approvalCode: result.approvalCode,
+            stan: result.stan,
+            rrn: result.rrn,
+            rawHex: result.rawHex,
+            fields: result.fields,
+            receivedAt: new Date().toISOString(),
+          },
+          startedAt: new Date(startTime).toISOString(),
+        };
+
+        this.saveUnresolvedTransaction(unresRecord);
+        console.warn(`[${new Date().toISOString()}] [UNRESOLVED_SAVED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}, Adapter=${terminalAdapter.name}: Persisted to netsUnresolved.json with preserved late approval.`);
+
+        if (linkMonitor) linkMonitor.stop();
+
+        const unresErr = new Error(`Physical network disconnect occurred during payment for ${flowName} (ECN=${ecn}). Transaction requires cashier reconciliation before completing order.`);
+        unresErr.code = 'ERECONCILIATIONREQUIRED';
+        unresErr.originalEcn = ecn;
+        unresErr.unresolved = unresRecord;
+        unresErr.lateResponse = result;
+        throw unresErr;
+      }
+
+      if (linkMonitor) linkMonitor.stop();
       this.lastTransaction = result;
 
       // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
@@ -2356,6 +2640,8 @@ class NetsService {
     let amountStr = '';
     let refNum = '';
     const startTime = Date.now();
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    let linkMonitor = null;
 
     try {
       ecn = retrySameEcn || await this.getNextEcnAsync();
@@ -2380,7 +2666,17 @@ class NetsService {
       console.log(`[${new Date().toISOString()}] [ORIGINAL_FC30_TX] [${flowName}] ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
 
-      const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
+      // Start physical link monitor for the duration of this payment
+      const terminalAdapter = this.getTerminalNetworkInterface();
+      linkMonitor = this.startPaymentLinkMonitor({
+        ecn,
+        ecrRef: refNum,
+        requestId,
+        adapterName: terminalAdapter.name,
+      });
+
+      // Pass linkMonitor into sendPacket context
+      const sendContext = {
         isFinancial: true,
         isQr: txnType === '04',
         txnType,
@@ -2389,7 +2685,11 @@ class NetsService {
         ecrRef: refNum,
         amount,
         amountStr,
-      });
+        requestId,
+        linkMonitor,
+      };
+
+      const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, sendContext);
       this.isProcessing = false;
 
       const isApproved = res.parsed.isApproved;
@@ -2417,9 +2717,73 @@ class NetsService {
         rawHex: res.rawHex,
       };
 
+      // CRITICAL REQUIREMENT 3: Handle Approval Received After a Detected Disconnect
+      const disconnectObserved = Boolean(linkMonitor && linkMonitor.isDisconnectObserved);
+      if (disconnectObserved) {
+        console.warn(`[${new Date().toISOString()}] [LATE_APPROVAL_AFTER_DISCONNECT] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}, Adapter=${terminalAdapter.name}: Physical link disconnect was observed during in-flight payment, but terminal returned response (RC=${result.responseCode}, ApprovalCode=${result.approvalCode}).`);
+        console.warn(`[${new Date().toISOString()}] [AUTO_COMPLETION_BLOCKED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Automatic bill completion / save is BLOCKED! Preserving approval details for cashier second Pay click.`);
+
+        // Wait out the remainder of the original financial timeout to enforce deadline
+        const elapsedSinceStart = Date.now() - startTime;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        if (elapsedSinceStart < totalTimeoutTarget) {
+          const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
+          console.log(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_WAITING] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Waiting ${remainingWaitMs}ms to enforce complete ${totalTimeoutTarget}ms financial deadline...`);
+          if (onProgress) {
+            onProgress({
+              status: 'waiting_timeout',
+              message: `Network link changed during payment. Awaiting financial deadline (${Math.round(remainingWaitMs / 1000)}s)...`,
+            });
+          }
+          await this._delay(remainingWaitMs);
+        }
+
+        const totalElapsed = Date.now() - startTime;
+        console.warn(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_REACHED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Configured financial deadline reached after ${totalElapsed}ms.`);
+
+        // Persist UNRESOLVED transaction preserving the late approval response
+        const unresRecord = {
+          ecn,
+          originalEcn: ecn,
+          ecrRef: refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType: txnType || '01',
+          status: 'UNRESOLVED',
+          disconnectObserved: true,
+          disconnectDetails: linkMonitor.getDisconnectDetails(),
+          unresolvedReason: `Physical network disconnect was detected during payment. Terminal responded with ${result.approvalCode ? 'Approval (' + result.approvalCode + ')' : 'RC=' + result.responseCode}. Automatic close blocked. Manual cashier reconciliation required.`,
+          lateResponse: {
+            isApproved: result.isApproved,
+            responseCode: result.responseCode,
+            approvalCode: result.approvalCode,
+            stan: result.stan,
+            rrn: result.rrn,
+            rawHex: result.rawHex,
+            fields: result.fields,
+            receivedAt: new Date().toISOString(),
+          },
+          startedAt: new Date(startTime).toISOString(),
+        };
+
+        this.saveUnresolvedTransaction(unresRecord);
+        console.warn(`[${new Date().toISOString()}] [UNRESOLVED_SAVED] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}, Adapter=${terminalAdapter.name}: Persisted to netsUnresolved.json with preserved late approval.`);
+
+        if (linkMonitor) linkMonitor.stop();
+
+        const unresErr = new Error(`Physical network disconnect occurred during payment for ${flowName} (ECN=${ecn}). Transaction requires cashier reconciliation before completing order.`);
+        unresErr.code = 'ERECONCILIATIONREQUIRED';
+        unresErr.originalEcn = ecn;
+        unresErr.unresolved = unresRecord;
+        unresErr.lateResponse = result;
+        throw unresErr;
+      }
+
+      if (linkMonitor) linkMonitor.stop();
       this.lastTransaction = result;
 
-      // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
+      // SCENARIO A: Normal Approval without physical link disconnect
       if (isApproved) {
         console.log(`[${new Date().toISOString()}] [ORIGINAL_APPROVED] [${flowName}] ECN=${ecn}, Ref=${refNum}, ApprovalCode=${result.approvalCode}`);
         const unresList = this.loadUnresolvedTransactions();

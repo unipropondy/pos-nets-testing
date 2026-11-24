@@ -7,10 +7,10 @@
   "merchantId": "111000023560",
   "terminalId": "20035923",
   "ecrRefFieldCode": "HD",
-  "autoRetryWithSameEcn": true,
+  "autoRetryWithSameEcn": false,
   "lastApprovedQueryOnTimeout": true,
-  "recoveryInitialDelayMs": 4000,
+  "recoveryInitialDelayMs": 2000,
   "recoveryRetryDelayMs": 2000,
-  "recoveryMaxRetries": 2,
-  "recoveryTimeoutMs": 120000
+  "recoveryMaxRetries": 1,
+  "recoveryTimeoutMs": 35000
 }
