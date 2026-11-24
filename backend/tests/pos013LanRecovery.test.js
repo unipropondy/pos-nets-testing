@@ -382,6 +382,17 @@ function cleanupTestState() {
       throw new Error(`Unexpected functionCode: ${parsedReq.functionCode}`);
     };
 
+    // 1. Next payment action reconciles the previous unresolved transaction first
+    const recoveredPayment = await service.purchaseCard({
+      amount: 10.00,
+      ecrRef: 'NEW_ORDER_9999',
+    });
+
+    assert.strictEqual(recoveredPayment.isApproved, true);
+    assert.strictEqual(recoveredPayment.ecn, '000000016672', 'First reconciled the prior unresolved transaction');
+    assert.strictEqual(service.loadUnresolvedTransactions().length, 0, 'Unresolved record cleared upon confirmed approval');
+
+    // 2. Next payment proceeds as a fresh transaction
     const newPayment = await service.purchaseCard({
       amount: 10.00,
       ecrRef: 'NEW_ORDER_9999',
@@ -389,9 +400,7 @@ function cleanupTestState() {
 
     assert.strictEqual(newPayment.isApproved, true);
     assert.strictEqual(newPayment.ecn, '000000016674'); // fresh ECN (16673 used for FC 55, 16674 for purchase)
-    assert.notStrictEqual(newPayment.ecn, '000000016672', 'Must never reuse the old ECN');
-    assert.ok(service.getUnresolvedTransaction(), 'Previous unresolved transaction record remains recorded as UNKNOWN');
-    assert.strictEqual(service.getUnresolvedTransaction().ecn, '000000016672');
+    assert.notStrictEqual(newPayment.ecn, '000000016672', 'Must never reuse the old ECN for fresh purchase');
   });
 
   // ---------------------------------------------------------------------------

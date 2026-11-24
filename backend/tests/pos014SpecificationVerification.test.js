@@ -125,7 +125,20 @@ function cleanupTestState() {
       throw new Error(`Unexpected invocation ${sendPacketInvocation}`);
     };
 
-    // Step 1: Initiate purchase
+    // Step 1: Initiate purchase (encounters disconnect, leaves unresolved on disk)
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: TARGET_AMOUNT,
+        ecrRef: TARGET_REF,
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'First purchase attempt must fail due to LAN disconnect');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Step 2: Cashier initiates next payment action (which triggers on-demand reconciliation of unresolved record)
     const result = await service.purchaseCard({
       amount: TARGET_AMOUNT,
       ecrRef: TARGET_REF,
@@ -245,6 +258,7 @@ function cleanupTestState() {
     service.sendPacket = async () => {
       const timeoutErr = new Error('connect ETIMEDOUT');
       timeoutErr.code = 'ETIMEDOUT';
+      timeoutErr.isTimeout = true;
       timeoutErr.requestDispatched = true;
       throw timeoutErr;
     };
