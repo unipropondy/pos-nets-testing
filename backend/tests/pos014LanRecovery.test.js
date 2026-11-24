@@ -242,10 +242,24 @@ function cleanupTestState() {
       throw new Error(`Unexpected function code ${parsed.functionCode}`);
     };
 
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: testAmount,
+        ecrRef: testRef,
+        retrySameEcn: originalEcn,
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+
+    assert.ok(caughtErr, 'First purchase attempt must fail and preserve unresolved state');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Cashier initiates the next payment action, which reconciles the unresolved transaction
     const res = await service.purchaseCard({
       amount: testAmount,
       ecrRef: testRef,
-      retrySameEcn: originalEcn,
     });
 
     assert.strictEqual(res.isApproved, true);

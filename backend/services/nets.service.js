@@ -686,6 +686,98 @@ class NetsService {
   }
 
   /**
+   * POS-014: On-Demand Pre-Purchase Reconciliation Check
+   * When cashier initiates the next payment action:
+   * 1. Inspect unresolved transaction records.
+   * 2. If an unresolved transaction exists, reconcile it BEFORE creating/sending any new purchase.
+   * 3. Uses same-ECN FC 30 retransmission (or FC 56) with original ECN, amount, and reference.
+   * 4. If recovered as APPROVED:
+   *    - Marks the original transaction APPROVED and clears unresolved state.
+   *    - Returns the recovered approval immediately, preventing any second charge or duplicate purchase!
+   * 5. If recovered as DECLINED / CANCELLED:
+   *    - Clears the unresolved record so the cashier can proceed with the new payment.
+   * 6. If terminal is unreachable or recovery fails with transport error:
+   *    - Retains UNRESOLVED state and throws ERECONCILIATIONREQUIRED, blocking new payment.
+   */
+  async reconcileUnresolvedBeforeNextPurchase(onProgress = null) {
+    const unresList = this.loadUnresolvedTransactions();
+    if (!unresList || unresList.length === 0) {
+      return null; // No unresolved transactions, proceed with new purchase
+    }
+
+    const pending = unresList[0];
+    const originalEcn = pending.originalEcn || pending.ecn;
+    const refNum = pending.ecrRef;
+    const amount = pending.amount;
+    const amountStr = pending.amountStr || formatAmount(amount);
+    const flowName = pending.flowName || 'NETS Card';
+    const txnType = pending.txnType || '01';
+
+    console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] Next payment action detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
+
+    if (onProgress) {
+      onProgress({
+        status: 'recovery_wait',
+        message: `Previous transaction (ECN ${originalEcn}) requires reconciliation. Verifying terminal status...`,
+      });
+    }
+
+    // Execute POS-014 recovery for the unresolved transaction
+    let recoveryResult;
+    try {
+      if (this.config.autoRetryWithSameEcn) {
+        recoveryResult = await this._recoverWithSameEcn({
+          originalEcn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType,
+          initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
+          onProgress,
+        });
+      } else if (this.config.lastApprovedQueryOnTimeout) {
+        recoveryResult = await this._recoverWithLastApproved({
+          originalEcn,
+          refNum,
+          amount,
+          amountStr,
+          flowName,
+          txnType,
+          initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
+          onProgress,
+        });
+      } else {
+        const blockedErr = new Error(`Unresolved transaction pending (ECN=${originalEcn}). Recovery is disabled in configuration. Manual resolution required.`);
+        blockedErr.code = 'ERECONCILIATIONREQUIRED';
+        blockedErr.originalEcn = originalEcn;
+        throw blockedErr;
+      }
+    } catch (recErr) {
+      // If recovery failed or threw ERECONCILIATIONREQUIRED / ETIMEDOUT, block new purchase!
+      console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] Reconciliation of unresolved transaction ECN=${originalEcn} failed: ${recErr.message}. Blocking new purchase.`);
+      throw recErr;
+    }
+
+    if (recoveryResult && recoveryResult.isApproved) {
+      console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Prior unresolved transaction ECN=${originalEcn} recovered as APPROVED! Returning approved transaction and stopping new purchase.`);
+      return {
+        reconciled: true,
+        isApproved: true,
+        result: recoveryResult,
+      };
+    }
+
+    // If terminal confirmed DECLINED or CANCELLED, remove from unresolved list and allow new payment
+    console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Prior unresolved transaction ECN=${originalEcn} was conclusively ${recoveryResult?.status || 'DECLINED'}. Unresolved state cleared. Allowing new payment to proceed.`);
+    return {
+      reconciled: true,
+      isApproved: false,
+      result: recoveryResult,
+    };
+  }
+
+  /**
    * POS-013: Pre-purchase terminal availability check.
    * Ensures:
    * 1. Terminal is not busy with another operation in-memory (concurrency guard).
@@ -1158,6 +1250,15 @@ class NetsService {
 
       // Other non-approved response code (e.g. decline)
       console.warn(`[NetsService] [POS-014] [${flowName}] Same ECN recovery returned terminal response code ${responseCode} (${recoveryRes.parsed.responseDescription}). Marking DECLINED.`);
+
+      // Clear matching unresolved record from persistence upon definitive decline
+      const unresList = this.loadUnresolvedTransactions();
+      const unresIdx = unresList.findIndex(t => t.ecn === originalEcn || t.originalEcn === originalEcn);
+      if (unresIdx >= 0) {
+        unresList.splice(unresIdx, 1);
+        this.saveUnresolvedTransactions(unresList);
+      }
+
       const declinedResult = {
         ecn: originalEcn,
         recoveryEcn,
@@ -1777,6 +1878,14 @@ class NetsService {
    * Supports: NETS Chip, Tap, Magnetic Stripe, and FlashPay contactless cards.
    */
   async purchaseCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    // Check for previous unresolved transactions before initiating new purchase
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
     return this._executePurchaseTransaction({
       amount,
       ecrRef,
@@ -1792,6 +1901,14 @@ class NetsService {
    * Displays NETS Scan to Pay dynamic QR code on the Ingenico terminal display.
    */
   async purchaseQr({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    // Check for previous unresolved transactions before initiating new purchase
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
     return this._executePurchaseTransaction({
       amount,
       ecrRef,
@@ -1808,6 +1925,14 @@ class NetsService {
    * Supports Visa, Mastercard, AMEX with automatic BIN processing (Field 9G omitted).
    */
   async purchaseCreditCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+    // Check for previous unresolved transactions before initiating new purchase
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
     return this._executeCreditCardTransaction({
       amount,
       ecrRef,
@@ -1955,8 +2080,7 @@ class NetsService {
         throw new Error('Terminal is currently busy. Please wait and try again.');
       }
 
-      // POS-014 vs POS-013 Recovery Strategy Selection:
-      // CRITICAL SAFETY AUDIT: Only trigger recovery when the transaction outcome is GENUINELY uncertain.
+      // Check whether outcome is genuinely uncertain
       const isUncertainOutcome = Boolean(
         err.isTimeout ||
         err.isUncertain ||
@@ -1964,31 +2088,37 @@ class NetsService {
         (err.requestDispatched && (err.code === 'ECONNRESET' || err.code === 'EUNCERTAIN_SOCKET_CLOSED' || err.code === 'ESOCKET' || err.code === 'EPIPE'))
       );
 
-      // POS-014 vs POS-013 Recovery Strategy Selection:
-      // When autoRetryWithSameEcn is true, POS-014 same-ECN retransmission is executed (reusing original ECN).
-      // Otherwise, if lastApprovedQueryOnTimeout is enabled, POS-013 FC 56 inquiry recovery is executed.
-      if (isUncertainOutcome && this.config.autoRetryWithSameEcn) {
-        return await this._recoverWithSameEcn({
+      // Record unresolved transaction state immediately without background retry
+      if (isUncertainOutcome && ecn) {
+        const unresRecord = {
+          ecn,
           originalEcn: ecn,
-          refNum,
+          ecrRef: refNum,
           amount,
           amountStr,
           flowName,
           txnType: 'I0',
-          initialError: err,
-          onProgress,
-        });
-      } else if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        return await this._recoverWithLastApproved({
-          originalEcn: ecn,
-          refNum,
-          amount,
-          amountStr,
-          flowName,
-          txnType: 'I0',
-          initialError: err,
-          onProgress,
-        });
+          status: 'UNRESOLVED',
+          unresolvedReason: `Transaction timed out or socket disconnected (${err.message}). Awaiting cashier next-action reconciliation.`,
+          lastTransportError: {
+            code: err.code || (err.isTimeout ? 'ETIMEDOUT' : 'UNKNOWN'),
+            message: err.message,
+            isTimeout: Boolean(err.isTimeout),
+            isPrematureClose: Boolean(err.isPrematureClose),
+            requestDispatched: Boolean(err.requestDispatched),
+          },
+          startedAt: new Date().toISOString(),
+        };
+
+        console.warn(`[${new Date().toISOString()}] [UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}: Persisting UNRESOLVED state. No immediate background recovery dispatched.`);
+        this.saveUnresolvedTransaction(unresRecord);
+
+        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out or connection dropped. Transaction preserved for reconciliation. Do NOT recharge customer.`);
+        unresErr.code = 'ERECONCILIATIONREQUIRED';
+        unresErr.originalEcn = ecn;
+        unresErr.lastError = err;
+        unresErr.unresolved = unresRecord;
+        throw unresErr;
       }
 
       throw err;
@@ -2124,8 +2254,7 @@ class NetsService {
         throw new Error('Terminal is currently busy. Please wait and try again.');
       }
 
-      // Handle Timeout / Uncertain outcome: POS-014 Same ECN Recovery vs POS-013 FC 56 Recovery
-      // CRITICAL SAFETY AUDIT: Only trigger recovery when the transaction outcome is GENUINELY uncertain.
+      // Check whether outcome is genuinely uncertain
       // (e.g. response timeout, socket error/reset after request was dispatched, premature close, or frame parse error).
       // If the request was never written to the socket (!err.requestDispatched), no recovery is needed (terminal never saw it).
       const isUncertainOutcome = Boolean(
@@ -2135,28 +2264,38 @@ class NetsService {
         (err.requestDispatched && (err.code === 'ECONNRESET' || err.code === 'EUNCERTAIN_SOCKET_CLOSED' || err.code === 'ESOCKET' || err.code === 'EPIPE'))
       );
 
-      if (isUncertainOutcome && this.config.autoRetryWithSameEcn) {
-        return await this._recoverWithSameEcn({
+      // Record unresolved transaction state immediately without background retry
+      // Cashier will reconcile on their next payment action or explicit retry
+      if (isUncertainOutcome && ecn) {
+        const unresRecord = {
+          ecn,
           originalEcn: ecn,
-          refNum,
+          ecrRef: refNum,
           amount,
           amountStr,
           flowName,
-          txnType,
-          initialError: err,
-          onProgress,
-        });
-      } else if (isUncertainOutcome && this.config.lastApprovedQueryOnTimeout) {
-        return await this._recoverWithLastApproved({
-          originalEcn: ecn,
-          refNum,
-          amount,
-          amountStr,
-          flowName,
-          txnType,
-          initialError: err,
-          onProgress,
-        });
+          txnType: txnType || '01',
+          status: 'UNRESOLVED',
+          unresolvedReason: `Transaction timed out or socket disconnected (${err.message}). Awaiting cashier next-action reconciliation.`,
+          lastTransportError: {
+            code: err.code || (err.isTimeout ? 'ETIMEDOUT' : 'UNKNOWN'),
+            message: err.message,
+            isTimeout: Boolean(err.isTimeout),
+            isPrematureClose: Boolean(err.isPrematureClose),
+            requestDispatched: Boolean(err.requestDispatched),
+          },
+          startedAt: new Date().toISOString(),
+        };
+
+        console.warn(`[${new Date().toISOString()}] [UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}: Persisting UNRESOLVED state. No immediate background recovery dispatched.`);
+        this.saveUnresolvedTransaction(unresRecord);
+
+        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out or connection dropped. Transaction preserved for reconciliation. Do NOT recharge customer.`);
+        unresErr.code = 'ERECONCILIATIONREQUIRED';
+        unresErr.originalEcn = ecn;
+        unresErr.lastError = err;
+        unresErr.unresolved = unresRecord;
+        throw unresErr;
       }
 
       throw err;

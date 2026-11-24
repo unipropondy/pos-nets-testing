@@ -149,6 +149,19 @@ function cleanupTestState() {
     let seq = 16771;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 10.0,
+        ecrRef: '1795440395401',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'First purchase attempt must fail due to LAN disconnect');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next payment action triggers on-demand recovery
     const res = await service.purchaseCard({
       amount: 10.0,
       ecrRef: '1795440395401',
@@ -226,6 +239,19 @@ function cleanupTestState() {
     let seq = 16772;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 3.0,
+        ecrRef: '1795440395402',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'First call must fail due to socket timeout and preserve unresolved transaction');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next payment action triggers on-demand recovery
     await service.purchaseCard({
       amount: 3.0,
       ecrRef: '1795440395402',
@@ -416,6 +442,19 @@ function cleanupTestState() {
     let seq = 16777;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 5.0,
+        ecrRef: '1795440395407',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'First call must fail due to timeout and preserve unresolved transaction');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next payment action triggers on-demand recovery
     const res = await service.purchaseCard({
       amount: 5.0,
       ecrRef: '1795440395407',

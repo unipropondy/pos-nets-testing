@@ -154,6 +154,19 @@ function cleanupTestState() {
       }
     };
 
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: 1.0,
+        ecrRef: '1795440395385',
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'First call must fail due to timeout and preserve unresolved transaction');
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Next payment action triggers on-demand recovery
     const res = await service.purchaseCard({
       amount: 1.0,
       ecrRef: '1795440395385',
