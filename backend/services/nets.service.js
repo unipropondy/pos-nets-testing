@@ -702,8 +702,10 @@ class NetsService {
    * Used for transaction inquiry and recovery
    * Allows passing an explicit ECN or generating a fresh atomic ECN
    */
-  async getLastApprovedTransaction(explicitEcn = null) {
+  async getLastApprovedTransaction(explicitEcn = null, context = {}) {
     const ecn = explicitEcn || await this.getNextEcnAsync();
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    const triggerSource = context.triggerSource || 'CASHIER_SECOND_PAY';
     const frame = buildNetsFrame({
       ecn,
       functionCode: '56',
@@ -711,7 +713,7 @@ class NetsService {
       fields: [],
     });
 
-    console.log(`[NetsService] Sending FC 56 (Last Approved) ECN=${ecn}`);
+    console.log(`[${new Date().toISOString()}] [RECOVERY_FC56_TX] Sending FC 56 (Last Approved) ECN=${ecn}, RequestID=${requestId}, Source=${triggerSource}`);
     const res = await this.sendPacket(frame, this.config.adminTimeoutMs);
     return {
       ecn,
@@ -767,7 +769,7 @@ class NetsService {
     const flowName = pending.flowName || 'NETS Card';
     const txnType = pending.txnType || '01';
     const requestId = context.requestId || 'REQ_' + Date.now();
-    const triggerSource = context.triggerSource || (context.isCashierInitiated ? 'CASHIER_CLICK' : 'CASHIER_PAY_ACTION');
+    const triggerSource = 'CASHIER_SECOND_PAY';
     const cashierActionToken = context.cashierActionToken || 'NONE';
 
     console.log(`[${new Date().toISOString()}] [CASHIER_EXPLICIT_PAY_CLICK] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}, Amount=${amount}, ECRRef=${refNum}, ECN=${originalEcn}`);
@@ -1496,7 +1498,10 @@ class NetsService {
     txnType,
     initialError,
     onProgress = null,
+    context = {},
   }) {
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    const triggerSource = context.triggerSource || 'CASHIER_SECOND_PAY';
     if (this.isRecoveryInProgress) {
       console.warn(`[NetsService] [POS-013] [${flowName}] Recovery already in progress for ECN=${originalEcn}. Rejecting concurrent recovery loop.`);
       throw new Error(`Recovery already in progress for this transaction (ECN=${originalEcn}).`);
@@ -1555,7 +1560,7 @@ class NetsService {
           });
         }
 
-        inquiry = await this.getLastApprovedTransaction(recoveryEcn);
+        inquiry = await this.getLastApprovedTransaction(recoveryEcn, { requestId, triggerSource });
         recoveryAudit.recoveryAttempts.push({
           attempt,
           recoveryEcn,
