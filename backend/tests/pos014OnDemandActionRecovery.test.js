@@ -36,6 +36,7 @@ function createTestService() {
   service.getUnresolvedFilePath = () => UNRESOLVED_TEST_PATH;
   service.getAuditHistoryFilePath = () => AUDIT_TEST_PATH;
   service.getEcnFilePath = () => ECN_TEST_PATH;
+  service.config.financialTimeoutMs = 50;
   service.config.autoRetryWithSameEcn = true;
   service.config.recoveryInitialDelayMs = 10;
   service.config.recoveryLanMaxWaitMs = 500;

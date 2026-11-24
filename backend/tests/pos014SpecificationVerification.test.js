@@ -126,10 +126,24 @@ function cleanupTestState() {
       throw new Error(`Unexpected invocation ${sendPacketInvocation}`);
     };
 
-    // Single cashier purchase call executes both initial FC30 and automatic recovery after timeout
+    // First cashier purchase call times out and marks UNRESOLVED
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: TARGET_AMOUNT,
+        ecrRef: TARGET_REF,
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Cashier initiates NEXT payment action -> reconciles prior unresolved transaction using same ECN
     const result = await service.purchaseCard({
       amount: TARGET_AMOUNT,
       ecrRef: TARGET_REF,
+      isCashierInitiated: true,
     });
 
     // Validations:

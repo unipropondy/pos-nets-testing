@@ -244,12 +244,26 @@ function cleanupTestState() {
       throw new Error(`Unexpected function code ${parsed.functionCode}`);
     };
 
-    // With timeout-driven automatic recovery, the first purchase call waits for the timeout
-    // and automatically executes the FC 56 recovery, returning the approved result!
+    // In the new business behavior, the initial purchase throws ERECONCILIATIONREQUIRED upon timeout.
+    // Recovery happens when the cashier triggers the NEXT purchase action.
+    let caughtErr = null;
+    try {
+      await service.purchaseCard({
+        amount: testAmount,
+        ecrRef: testRef,
+        retrySameEcn: originalEcn,
+      });
+    } catch (err) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr);
+    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
+
+    // Cashier initiates next action -> reconciles unresolved transaction via FC 56
     const res = await service.purchaseCard({
       amount: testAmount,
-      ecrRef: testRef,
-      retrySameEcn: originalEcn,
+      ecrRef: testRef + '_next',
+      isCashierInitiated: true,
     });
 
     assert.strictEqual(res.isApproved, true);

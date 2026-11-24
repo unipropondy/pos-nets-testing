@@ -471,6 +471,10 @@ class NetsService {
       let isResolved = false;
       let requestDispatched = false;
       const startTime = Date.now();
+      const timeoutDeadline = startTime + timeoutMs;
+      const socketId = `SOCK_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Init sendPacket: ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}, TxnType=${context.txnType || 'N/A'}, TimeoutMs=${timeoutMs}, StartTime=${startTime}, Deadline=${timeoutDeadline} (${new Date(timeoutDeadline).toISOString()})`);
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
@@ -483,13 +487,14 @@ class NetsService {
         if (isResolved) return;
         isResolved = true;
         const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] finishSuccess: duration=${duration}ms, bytes=${buf.length}, remaining=${remainingBuf.length}, ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}`);
         console.log(`[${new Date().toISOString()}] [NETS Socket] RX Frame Complete (${buf.length} bytes, remaining=${remainingBuf.length} bytes, duration=${duration}ms): ${sanitizeRawHex(buf.toString('hex'))}`);
         cleanup();
         try {
           const parsed = parseNetsFrame(buf, { context });
-          resolve({ parsed, rawHex: buf.toString('hex'), remainingBytes: remainingBuf });
+          resolve({ parsed, rawHex: buf.toString('hex'), remainingBytes: remainingBuf, socketId, duration });
         } catch (err) {
-          console.error(`[${new Date().toISOString()}] [NETS Socket] RX Frame Parse Error: ${err.message}`);
+          console.error(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] RX Frame Parse Error: ${err.message}`);
           err.isUncertain = requestDispatched;
           err.requestDispatched = requestDispatched;
           reject(err);
@@ -500,6 +505,7 @@ class NetsService {
         if (isResolved) return;
         isResolved = true;
         const duration = Date.now() - startTime;
+        console.error(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] finishError: (${err.code || 'UNKNOWN'}, duration=${duration}ms, dispatched=${requestDispatched}, ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}): ${err.message}`);
         console.error(`[${new Date().toISOString()}] [NETS Socket] Error (${err.code || 'UNKNOWN'}, duration=${duration}ms, dispatched=${requestDispatched}): ${err.message}`);
         cleanup();
         err.requestDispatched = requestDispatched;
@@ -522,7 +528,7 @@ class NetsService {
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
         timeoutErr.requestDispatched = requestDispatched;
-        console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}: Fired after ${elapsed}ms (configured: ${timeoutMs}ms)`);
+        console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] [${socketId}] ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}: Fired after ${elapsed}ms (configured: ${timeoutMs}ms, deadline was ${new Date(timeoutDeadline).toISOString()})`);
         finishError(timeoutErr);
       }, timeoutMs);
 
@@ -532,7 +538,9 @@ class NetsService {
           connectTimer = null;
         }
 
-        console.log(`[${new Date().toISOString()}] [NETS Socket] Connected to terminal at ${terminalIp}:${terminalPort} (took ${Date.now() - startTime}ms)`);
+        const connectDuration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'connect' - TCP connection ESTABLISHED to ${terminalIp}:${terminalPort} (localPort=${socket.localPort}, took ${connectDuration}ms)`);
+        console.log(`[${new Date().toISOString()}] [NETS Socket] Connected to terminal at ${terminalIp}:${terminalPort} (took ${connectDuration}ms)`);
 
         // Keep socket timeout active for stalled responses instead of clearing it to 0
         socket.setTimeout(timeoutMs);
@@ -543,10 +551,12 @@ class NetsService {
           if (err) {
             const writeErr = new Error(`Failed to send data to terminal: ${err.message}`);
             writeErr.requestDispatched = false;
+            console.error(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Write failed: ${err.message}`);
             console.error(`[${new Date().toISOString()}] [NETS Socket] Write failed: ${err.message}`);
             finishError(writeErr);
           } else {
             requestDispatched = true;
+            console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'write_success' - TX Buffer Dispatched (${frameBuffer.length} bytes) to ${terminalIp}:${terminalPort}, requestDispatched=true`);
             console.log(`[${new Date().toISOString()}] [NETS Socket] TX Buffer Dispatched (${frameBuffer.length} bytes) to ${terminalIp}:${terminalPort}`);
             if (onProgress) onProgress({ status: 'sent', message: 'Frame dispatched to terminal, awaiting response' });
           }
@@ -555,6 +565,7 @@ class NetsService {
 
       socket.on('timeout', () => {
         const elapsed = Date.now() - startTime;
+        console.warn(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'timeout' - Socket idle after ${elapsed}ms (configured=${timeoutMs}ms, requestDispatched=${requestDispatched})`);
         const timeoutErr = new Error(`NETS Terminal socket idle timed out after ${timeoutMs / 1000} seconds (real elapsed: ${elapsed}ms)`);
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
@@ -565,6 +576,7 @@ class NetsService {
 
       socket.on('data', (chunk) => {
         responseBuffer = Buffer.concat([responseBuffer, chunk]);
+        console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'data' - Chunk received (+${chunk.length} bytes, cumulative=${responseBuffer.length} bytes, duration=${Date.now() - startTime}ms)`);
         console.log(`[${new Date().toISOString()}] [NETS Socket] RX chunk received (+${chunk.length} bytes, total=${responseBuffer.length} bytes)`);
 
         // CRITICAL SPEC REQUIREMENT: Section 2.2.2.2 - NAK Handling on Ethernet Mode
@@ -584,6 +596,7 @@ class NetsService {
           const bodyAndLrcLen = fromBcd2(responseBuffer, 0);
           if (bodyAndLrcLen > 0) {
             expectedTotalLength = bodyAndLrcLen + 2;
+            console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] BCD header parsed: bodyAndLrcLen=${bodyAndLrcLen}, expectedTotalLength=${expectedTotalLength}`);
             console.log(`[${new Date().toISOString()}] [NETS Socket] BCD header parsed: bodyAndLrcLen=${bodyAndLrcLen}, expectedTotalLength=${expectedTotalLength}`);
           }
         }
@@ -595,13 +608,19 @@ class NetsService {
           const completeFrame = responseBuffer.slice(0, expectedTotalLength);
           const remainingBuffer = responseBuffer.slice(expectedTotalLength);
           if (remainingBuffer.length > 0) {
+            console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Preserved trailing ${remainingBuffer.length} bytes beyond complete frame`);
             console.log(`[${new Date().toISOString()}] [NETS Socket] Preserved trailing ${remainingBuffer.length} bytes beyond complete frame`);
           }
           finishSuccess(completeFrame, remainingBuffer);
         }
       });
 
+      socket.on('end', () => {
+        console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'end' - Half-closed by remote terminal (received FIN), bufferLength=${responseBuffer.length}, duration=${Date.now() - startTime}ms`);
+      });
+
       socket.on('error', (err) => {
+        console.error(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'error' - Code=${err.code || 'NONE'}, Message=${err.message}, duration=${Date.now() - startTime}ms, requestDispatched=${requestDispatched}`);
         const sockErr = new Error(`NETS Terminal socket error: ${err.message}`);
         sockErr.code = err.code || 'ESOCKET';
         sockErr.requestDispatched = requestDispatched;
@@ -610,6 +629,8 @@ class NetsService {
       });
 
       socket.on('close', (hadError) => {
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'close' - hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}, duration=${duration}ms, isResolved=${isResolved}`);
         console.log(`[${new Date().toISOString()}] [NETS Socket] Socket closed event: hadError=${hadError}, bufferLength=${responseBuffer.length}, expectedTotalLength=${expectedTotalLength}`);
         if (!isResolved) {
           if (expectedTotalLength !== null && responseBuffer.length >= expectedTotalLength) {
@@ -699,6 +720,20 @@ class NetsService {
    * 6. If terminal is unreachable or recovery fails with transport error:
    *    - Retains UNRESOLVED state and throws ERECONCILIATIONREQUIRED, blocking new payment.
    */
+  /**
+   * POS-014: Cashier-Initiated Pre-Purchase Reconciliation Check
+   * When cashier explicitly clicks Pay again:
+   * 1. Inspect unresolved transaction records.
+   * 2. If an unresolved transaction exists, reconcile it BEFORE creating/sending any new purchase.
+   * 3. Uses same-ECN FC 30 retransmission (or FC 56) with original ECN, amount, and reference.
+   * 4. If recovered as APPROVED:
+   *    - Marks the original transaction APPROVED and clears unresolved state.
+   *    - Returns the recovered approval immediately, preventing any second charge or duplicate purchase!
+   * 5. If recovered as DECLINED / CANCELLED:
+   *    - Clears the unresolved record so the cashier can proceed with the new payment.
+   * 6. If terminal is unreachable or recovery fails with transport error:
+   *    - Retains UNRESOLVED state and throws ERECONCILIATIONREQUIRED, blocking new payment.
+   */
   async reconcileUnresolvedBeforeNextPurchase(onProgress = null, context = {}) {
     const unresList = this.loadUnresolvedTransactions();
     if (!unresList || unresList.length === 0) {
@@ -713,9 +748,11 @@ class NetsService {
     const flowName = pending.flowName || 'NETS Card';
     const txnType = pending.txnType || '01';
     const requestId = context.requestId || 'REQ_' + Date.now();
-    const triggerSource = context.triggerSource || 'CASHIER_ACTION';
+    const triggerSource = context.triggerSource || (context.isCashierInitiated ? 'CASHIER_CLICK' : 'CASHIER_PAY_ACTION');
     const cashierActionToken = context.cashierActionToken || 'NONE';
 
+    console.log(`[${new Date().toISOString()}] [CASHIER_EXPLICIT_PAY_CLICK] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}, Amount=${amount}, ECRRef=${refNum}, ECN=${originalEcn}`);
+    console.log(`[${new Date().toISOString()}] [MANUAL_RECONCILIATION_START] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Initiating reconciliation before allowing new purchase...`);
     console.warn(`[${new Date().toISOString()}] [RECONCILIATION_TRIGGER] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
     console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] Next payment action detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
 
@@ -739,6 +776,11 @@ class NetsService {
           txnType,
           initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
           onProgress,
+          context: {
+            ...context,
+            requestId,
+            triggerSource,
+          },
         });
       } else if (this.config.lastApprovedQueryOnTimeout) {
         recoveryResult = await this._recoverWithLastApproved({
@@ -750,6 +792,11 @@ class NetsService {
           txnType,
           initialError: pending.lastTransportError || new Error('Previous transaction uncertain/timed out'),
           onProgress,
+          context: {
+            ...context,
+            requestId,
+            triggerSource,
+          },
         });
       } else {
         const blockedErr = new Error(`Unresolved transaction pending (ECN=${originalEcn}). Recovery is disabled in configuration. Manual resolution required.`);
@@ -764,6 +811,7 @@ class NetsService {
     }
 
     if (recoveryResult && recoveryResult.isApproved) {
+      console.log(`[${new Date().toISOString()}] [RECOVERED_APPROVED] [${flowName}] ECN=${originalEcn}, Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}: Recovered approval code=${recoveryResult.approvalCode}`);
       console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Prior unresolved transaction ECN=${originalEcn} recovered as APPROVED! Returning approved transaction and stopping new purchase.`);
       return {
         reconciled: true,
@@ -1022,7 +1070,10 @@ class NetsService {
     txnType,
     initialError,
     onProgress = null,
+    context = {},
   }) {
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    const triggerSource = context.triggerSource || 'CASHIER_ACTION';
     if (this.isRecoveryInProgress) {
       console.warn(`[NetsService] [POS-014] [${flowName}] Recovery already in progress for ECN=${originalEcn}. Rejecting concurrent recovery loop.`);
       throw new Error(`Recovery already in progress for this transaction (ECN=${originalEcn}).`);
@@ -1057,7 +1108,7 @@ class NetsService {
       status: 'RECOVERY_IN_PROGRESS',
     };
 
-    console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Initiating Same-ECN Recovery for ECN=${originalEcn} (Ref=${refNum}, Amt=${amount}). Waiting ${initialDelay}ms for link stabilization...`);
+    console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Initiating Same-ECN Recovery for ECN=${originalEcn} (Ref=${refNum}, Amt=${amount}, RequestID=${requestId}, Source=${triggerSource}). Waiting ${initialDelay}ms for link stabilization...`);
 
     if (onProgress) {
       onProgress({
@@ -1132,8 +1183,8 @@ class NetsService {
     }
 
     const txHex = frame.toString('hex').toUpperCase();
-    console.log(`[${new Date().toISOString()}] [RECOVERY_FC30_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
-    console.log(`[${new Date().toISOString()}] [SAME_ECN_RECOVERY_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
+    console.log(`[${new Date().toISOString()}] [RECOVERY_FC30_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}`);
+    console.log(`[${new Date().toISOString()}] [SAME_ECN_RECOVERY_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}, RequestID=${requestId}, Source=${triggerSource}`);
     console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Raw Hex (${frame.length} bytes): ${txHex}`);
 
     let recoveryRes = null;
@@ -1886,6 +1937,14 @@ class NetsService {
     const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
     console.log(`[${new Date().toISOString()}] [PURCHASE_CARD_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
 
+    // If an unresolved transaction exists, reconcile it on cashier's explicit payment action
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
     return this._executePurchaseTransaction({
       amount,
       ecrRef,
@@ -1904,6 +1963,14 @@ class NetsService {
   async purchaseQr({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
     const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
     console.log(`[${new Date().toISOString()}] [PURCHASE_QR_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
+
+    // If an unresolved transaction exists, reconcile it on cashier's explicit payment action
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
 
     return this._executePurchaseTransaction({
       amount,
@@ -1925,6 +1992,14 @@ class NetsService {
     const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
     console.log(`[${new Date().toISOString()}] [PURCHASE_CREDIT_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
 
+    // If an unresolved transaction exists, reconcile it on cashier's explicit payment action
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
     return this._executeCreditCardTransaction({
       amount,
       ecrRef,
@@ -1938,7 +2013,7 @@ class NetsService {
    * Internal dedicated runner for Credit Card Sale (FC I0) with strict isolation and validation
    * @private
    */
-  async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+  async _executeCreditCardTransaction({ amount, ecrRef, retrySameEcn = null, onProgress = null, context = {} }) {
     const flowName = 'NETS Credit Card';
     const txnType = 'I0';
 
@@ -2099,29 +2174,7 @@ class NetsService {
 
         const totalElapsed = Date.now() - startTime;
         console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] ECN=${ecn}, Ref=${refNum}: Configured timeout reached (real elapsed: ${totalElapsed}ms, target: ${totalTimeoutTarget}ms)`);
-
-        if (this.config.autoRetryWithSameEcn) {
-          console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Timeout expired. Initiating automatic Same-ECN recovery for ECN=${ecn} (Ref=${refNum})...`);
-          try {
-            const recoveryResult = await this._recoverWithSameEcn({
-              originalEcn: ecn,
-              refNum,
-              amount,
-              amountStr,
-              flowName,
-              txnType: 'I0',
-              initialError: err,
-              onProgress,
-            });
-            if (recoveryResult && recoveryResult.isApproved) {
-              console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Transaction ECN=${ecn} successfully recovered as APPROVED after timeout!`);
-              return recoveryResult;
-            }
-          } catch (recErr) {
-            console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] Automatic same-ECN recovery failed: ${recErr.message}. Preserving UNRESOLVED state.`);
-            throw recErr;
-          }
-        }
+        console.warn(`[${new Date().toISOString()}] [AUTO_RECOVERY_BLOCKED] ECN=${ecn}, Ref=${refNum}, RequestID=${context.requestId || 'N/A'}, Source=${context.triggerSource || 'N/A'}: Automatic recovery after timeout is DISABLED. No automatic FC30/FCI0 or FC56 dispatched. Preserving UNRESOLVED state.`);
 
         const unresRecord = {
           ecn,
@@ -2132,7 +2185,7 @@ class NetsService {
           flowName,
           txnType: 'I0',
           status: 'UNRESOLVED',
-          unresolvedReason: `Transaction timed out or socket disconnected (${err.message}). Awaiting reconciliation.`,
+          unresolvedReason: `Transaction timed out or connection dropped (${err.message}). Automatic retry is disabled. Awaiting explicit cashier action.`,
           lastTransportError: {
             code: err.code || (err.isTimeout ? 'ETIMEDOUT' : 'UNKNOWN'),
             message: err.message,
@@ -2143,10 +2196,10 @@ class NetsService {
           startedAt: new Date().toISOString(),
         };
 
-        console.warn(`[${new Date().toISOString()}] [UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}: Persisting UNRESOLVED state.`);
+        console.warn(`[${new Date().toISOString()}] [TRANSACTION_MARKED_UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}, RequestID=${context.requestId || 'N/A'}, Source=${context.triggerSource || 'N/A'}: Persisting UNRESOLVED state.`);
         this.saveUnresolvedTransaction(unresRecord);
 
-        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out or connection dropped. Transaction preserved for reconciliation. Do NOT recharge customer.`);
+        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out after ${totalElapsed}ms. Transaction preserved for reconciliation. Do NOT recharge customer.`);
         unresErr.code = 'ERECONCILIATIONREQUIRED';
         unresErr.originalEcn = ecn;
         unresErr.lastError = err;
@@ -2162,7 +2215,7 @@ class NetsService {
    * Internal common runner for FC 30 with strict flow isolation and validation
    * @private
    */
-  async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null }) {
+  async _executePurchaseTransaction({ amount, ecrRef, txnType = '01', flowName = 'NETS Card', retrySameEcn = null, onProgress = null, context = {} }) {
     // POS-013: Terminal Concurrency & Pre-purchase Availability Check
     await this.checkTerminalAvailabilityBeforePurchase(flowName);
 
@@ -2314,54 +2367,11 @@ class NetsService {
 
         const totalElapsed = Date.now() - startTime;
         console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] ECN=${ecn}, Ref=${refNum}: Configured timeout reached (real elapsed: ${totalElapsed}ms, target: ${totalTimeoutTarget}ms)`);
+        console.warn(`[${new Date().toISOString()}] [AUTO_RECOVERY_BLOCKED] ECN=${ecn}, Ref=${refNum}, RequestID=${context.requestId || 'N/A'}, Source=${context.triggerSource || 'N/A'}: Automatic recovery after timeout is DISABLED. No automatic FC30 or FC56 dispatched. Preserving UNRESOLVED state.`);
 
-        // Now that the original 120s timeout has expired:
-        // Automatically attempt POS-014 recovery (Same-ECN retransmission or FC 56)
-        if (this.config.autoRetryWithSameEcn) {
-          console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Timeout expired. Initiating automatic Same-ECN recovery for ECN=${ecn} (Ref=${refNum})...`);
-          try {
-            const recoveryResult = await this._recoverWithSameEcn({
-              originalEcn: ecn,
-              refNum,
-              amount,
-              amountStr,
-              flowName,
-              txnType: txnType || '01',
-              initialError: err,
-              onProgress,
-            });
-            if (recoveryResult && recoveryResult.isApproved) {
-              console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Transaction ECN=${ecn} successfully recovered as APPROVED after timeout!`);
-              return recoveryResult;
-            }
-          } catch (recErr) {
-            console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] Automatic same-ECN recovery failed: ${recErr.message}. Preserving UNRESOLVED state.`);
-            throw recErr;
-          }
-        } else if (this.config.lastApprovedQueryOnTimeout) {
-          console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Timeout expired. Initiating FC 56 recovery for ECN=${ecn} (Ref=${refNum})...`);
-          try {
-            const recoveryResult = await this._recoverWithLastApproved({
-              originalEcn: ecn,
-              refNum,
-              amount,
-              amountStr,
-              flowName,
-              txnType: txnType || '01',
-              initialError: err,
-              onProgress,
-            });
-            if (recoveryResult && recoveryResult.isApproved) {
-              console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] Transaction ECN=${ecn} successfully recovered as APPROVED via FC 56!`);
-              return recoveryResult;
-            }
-          } catch (recErr) {
-            console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] FC 56 recovery failed: ${recErr.message}. Preserving UNRESOLVED state.`);
-            throw recErr;
-          }
-        }
-
-        // If automatic recovery is disabled or did not approve, persist UNRESOLVED state
+        // Record unresolved transaction state immediately without background retry
+        // Persist the original ECN, amount, transaction type, and ECR reference.
+        // Recovery must happen ONLY when the cashier explicitly clicks Pay again.
         const unresRecord = {
           ecn,
           originalEcn: ecn,
@@ -2371,7 +2381,7 @@ class NetsService {
           flowName,
           txnType: txnType || '01',
           status: 'UNRESOLVED',
-          unresolvedReason: `Transaction timed out or socket disconnected (${err.message}). Awaiting reconciliation.`,
+          unresolvedReason: `Transaction timed out or connection dropped (${err.message}). Automatic retry is disabled. Awaiting explicit cashier action.`,
           lastTransportError: {
             code: err.code || (err.isTimeout ? 'ETIMEDOUT' : 'UNKNOWN'),
             message: err.message,
@@ -2382,10 +2392,10 @@ class NetsService {
           startedAt: new Date().toISOString(),
         };
 
-        console.warn(`[${new Date().toISOString()}] [UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}: Persisting UNRESOLVED state.`);
+        console.warn(`[${new Date().toISOString()}] [TRANSACTION_MARKED_UNRESOLVED] [${flowName}] ECN=${ecn}, Ref=${refNum}, RequestID=${context.requestId || 'N/A'}, Source=${context.triggerSource || 'N/A'}: Persisting UNRESOLVED state.`);
         this.saveUnresolvedTransaction(unresRecord);
 
-        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out or connection dropped. Transaction preserved for reconciliation. Do NOT recharge customer.`);
+        const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${ecn}). Request timed out after ${totalElapsed}ms. Transaction preserved for reconciliation. Do NOT recharge customer.`);
         unresErr.code = 'ERECONCILIATIONREQUIRED';
         unresErr.originalEcn = ecn;
         unresErr.lastError = err;
