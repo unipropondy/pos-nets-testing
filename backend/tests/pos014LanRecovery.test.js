@@ -103,6 +103,7 @@ function cleanupTestState() {
   await runAsyncTest('POS-014: Disconnect creates unresolved, same-ECN retry returns approved and clears unresolved record', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test
     let ecnCounter = 7000;
     service.getNextEcnAsync = async () => String(++ecnCounter).padStart(12, '0');
     service.config.recoveryInitialDelayMs = 20;
@@ -199,6 +200,7 @@ function cleanupTestState() {
   await runAsyncTest('POS-014: FC 56 recovery matches customer approval, returns approved, and clears unresolved entry', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test
     // Test FC 56 strategy specifically
     service.config.autoRetryWithSameEcn = false;
     service.config.lastApprovedQueryOnTimeout = true;
@@ -242,24 +244,12 @@ function cleanupTestState() {
       throw new Error(`Unexpected function code ${parsed.functionCode}`);
     };
 
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: testAmount,
-        ecrRef: testRef,
-        retrySameEcn: originalEcn,
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-
-    assert.ok(caughtErr, 'First purchase attempt must fail and preserve unresolved state');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Cashier initiates the next payment action, which reconciles the unresolved transaction
+    // With timeout-driven automatic recovery, the first purchase call waits for the timeout
+    // and automatically executes the FC 56 recovery, returning the approved result!
     const res = await service.purchaseCard({
       amount: testAmount,
       ecrRef: testRef,
+      retrySameEcn: originalEcn,
     });
 
     assert.strictEqual(res.isApproved, true);

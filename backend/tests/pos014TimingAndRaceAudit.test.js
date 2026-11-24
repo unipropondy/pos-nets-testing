@@ -54,6 +54,7 @@ function cleanupTestState() {
   await runAsyncTest('1 & 2. Recovery waits and aborts safely if terminal remains unreachable after LAN disconnect', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast 50ms timeout for test execution
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 10;
     service.config.recoveryLanMaxWaitMs = 100; // Fast 100ms probe wait for unit test
@@ -101,6 +102,7 @@ function cleanupTestState() {
   await runAsyncTest('3 & 4. LAN reconnection allows recovery with exact original ECN, amount, T2, and reference', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 10;
     service.config.recoveryLanMaxWaitMs = 2000;
@@ -149,19 +151,7 @@ function cleanupTestState() {
     let seq = 16771;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: 10.0,
-        ecrRef: '1795440395401',
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-    assert.ok(caughtErr, 'First purchase attempt must fail due to LAN disconnect');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Next payment action triggers on-demand recovery
+    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout!
     const res = await service.purchaseCard({
       amount: 10.0,
       ecrRef: '1795440395401',
@@ -205,6 +195,7 @@ function cleanupTestState() {
   await runAsyncTest('6 & 7. Only one final transaction result is recorded in audit history upon recovery', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 10;
     service.checkTerminalAvailabilityBeforePurchase = async () => {};
@@ -239,23 +230,14 @@ function cleanupTestState() {
     let seq = 16772;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: 3.0,
-        ecrRef: '1795440395402',
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-    assert.ok(caughtErr, 'First call must fail due to socket timeout and preserve unresolved transaction');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Next payment action triggers on-demand recovery
-    await service.purchaseCard({
+    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
+    const res = await service.purchaseCard({
       amount: 3.0,
       ecrRef: '1795440395402',
     });
+
+    assert.strictEqual(res.isApproved, true);
+    assert.strictEqual(res.recovered, true);
 
     const auditRaw = fs.readFileSync(AUDIT_TEST_PATH, 'utf8');
     const auditHistory = JSON.parse(auditRaw);
@@ -404,6 +386,7 @@ function cleanupTestState() {
   await runAsyncTest('12. Late original response during recovery: Exactly one final approval and one settlement record allowed', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 10;
     service.checkTerminalAvailabilityBeforePurchase = async () => {};
@@ -442,19 +425,7 @@ function cleanupTestState() {
     let seq = 16777;
     service.getNextEcnAsync = async () => String(++seq).padStart(12, '0');
 
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: 5.0,
-        ecrRef: '1795440395407',
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-    assert.ok(caughtErr, 'First call must fail due to timeout and preserve unresolved transaction');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Next payment action triggers on-demand recovery
+    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
     const res = await service.purchaseCard({
       amount: 5.0,
       ecrRef: '1795440395407',
