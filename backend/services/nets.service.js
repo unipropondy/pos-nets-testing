@@ -561,6 +561,14 @@ class NetsService {
         console.log(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Event: 'connect' - TCP connection ESTABLISHED to ${terminalIp}:${terminalPort} (localPort=${socket.localPort}, took ${connectDuration}ms)`);
         console.log(`[${new Date().toISOString()}] [NETS Socket] Connected to terminal at ${terminalIp}:${terminalPort} (took ${connectDuration}ms)`);
 
+        // Enable TCP Keep-Alive so network breaks / unplugged cables are detected by the OS stack quickly
+        try {
+          socket.setKeepAlive(true, 1000);
+          socket.setNoDelay(true);
+        } catch (kaErr) {
+          console.warn(`[${new Date().toISOString()}] [NETS Socket Lifecycle] [${socketId}] Failed to setKeepAlive: ${kaErr.message}`);
+        }
+
         // Keep socket timeout active for stalled responses instead of clearing it to 0
         socket.setTimeout(timeoutMs);
 
