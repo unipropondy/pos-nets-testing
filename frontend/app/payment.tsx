@@ -1662,7 +1662,7 @@ export default function PaymentScreen() {
             message = result.error || "Payment Blocked: An unresolved transaction is pending reconciliation.";
           } else if (isUnknown) {
             status = "failed";
-            message = "Transaction Status Unknown";
+            message = result.error || "Transaction Status Unknown: Unresolved transaction awaiting reconciliation. Click Pay to resolve.";
           } else if (isTimeout) {
             status = "failed";
             message = "Transaction Timed Out";
