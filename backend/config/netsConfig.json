@@ -1,7 +1,7 @@
 {
   "terminalIp": "192.168.0.170",
   "terminalPort": 3000,
-  "financialTimeoutMs": 120000,
+  "financialTimeoutMs": 30000,
   "adminTimeoutMs": 35000,
   "connectionTimeoutMs": 10000,
   "merchantId": "111000023560",
