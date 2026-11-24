@@ -276,14 +276,18 @@ router.post('/end-of-day', async (req, res) => {
  * Helper to process and broadcast payment transactions cleanly
  */
 async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, title, paymentMethodName }) {
-  const { amount, ecrRef, tableId = null, retrySameEcn = null } = req.body;
+  const { amount, ecrRef, tableId = null, retrySameEcn = null, isCashierInitiated = false, cashierActionToken = null } = req.body;
+  const requestId = req.headers['x-request-id'] || req.headers['x-client-request-id'] || 'REQ_' + Date.now();
+  const triggerSource = req.headers['x-trigger-source'] || (isCashierInitiated ? 'CASHIER_CLICK' : 'UNKNOWN_CLIENT');
   const io = req.app.get('socketio');
+
+  console.log(`[${new Date().toISOString()}] [BACKEND_PAYMENT_ROUTE_ENTER] Route=${req.originalUrl}, RequestID=${requestId}, Source=${triggerSource}, CashierInitiated=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
 
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
     return res.status(400).json({ success: false, error: 'Valid amount is required.' });
   }
 
-  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId, retrySameEcn });
+  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId, retrySameEcn, requestId, triggerSource });
 
   // Broadcast initial terminal payment status
   const waitingMessage = retrySameEcn
@@ -322,13 +326,24 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       }
     };
 
+    const purchaseOpts = {
+      amount: parseFloat(amount),
+      ecrRef,
+      retrySameEcn,
+      onProgress,
+      isCashierInitiated: Boolean(isCashierInitiated),
+      cashierActionToken,
+      requestId,
+      triggerSource,
+    };
+
     let result;
     if (isCreditCard) {
-      result = await netsService.purchaseCreditCard({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
+      result = await netsService.purchaseCreditCard(purchaseOpts);
     } else if (isQr) {
-      result = await netsService.purchaseQr({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
+      result = await netsService.purchaseQr(purchaseOpts);
     } else {
-      result = await netsService.purchaseCard({ amount: parseFloat(amount), ecrRef, retrySameEcn, onProgress });
+      result = await netsService.purchaseCard(purchaseOpts);
     }
 
     logComm('RX', `${title} Result`, result);

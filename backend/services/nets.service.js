@@ -699,7 +699,7 @@ class NetsService {
    * 6. If terminal is unreachable or recovery fails with transport error:
    *    - Retains UNRESOLVED state and throws ERECONCILIATIONREQUIRED, blocking new payment.
    */
-  async reconcileUnresolvedBeforeNextPurchase(onProgress = null) {
+  async reconcileUnresolvedBeforeNextPurchase(onProgress = null, context = {}) {
     const unresList = this.loadUnresolvedTransactions();
     if (!unresList || unresList.length === 0) {
       return null; // No unresolved transactions, proceed with new purchase
@@ -712,7 +712,11 @@ class NetsService {
     const amountStr = pending.amountStr || formatAmount(amount);
     const flowName = pending.flowName || 'NETS Card';
     const txnType = pending.txnType || '01';
+    const requestId = context.requestId || 'REQ_' + Date.now();
+    const triggerSource = context.triggerSource || 'CASHIER_ACTION';
+    const cashierActionToken = context.cashierActionToken || 'NONE';
 
+    console.warn(`[${new Date().toISOString()}] [RECONCILIATION_TRIGGER] RequestID=${requestId}, Source=${triggerSource}, Token=${cashierActionToken}: Detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
     console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] Next payment action detected pending unresolved transaction (ECN=${originalEcn}, Ref=${refNum}, Amt=${amount}). Reconciling prior transaction before allowing new purchase...`);
 
     if (onProgress) {
@@ -1128,6 +1132,7 @@ class NetsService {
     }
 
     const txHex = frame.toString('hex').toUpperCase();
+    console.log(`[${new Date().toISOString()}] [RECOVERY_FC30_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
     console.log(`[${new Date().toISOString()}] [SAME_ECN_RECOVERY_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
     console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Raw Hex (${frame.length} bytes): ${txHex}`);
 
@@ -1877,10 +1882,13 @@ class NetsService {
    * Dedicated NETS Card Purchase Flow (FC 30 with T2="01")
    * Supports: NETS Chip, Tap, Magnetic Stripe, and FlashPay contactless cards.
    */
-  async purchaseCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+  async purchaseCard({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
+    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
+    console.log(`[${new Date().toISOString()}] [PURCHASE_CARD_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
+
     // Check for previous unresolved transactions before initiating new purchase
     if (!retrySameEcn) {
-      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
       if (priorReconciliation && priorReconciliation.isApproved) {
         return priorReconciliation.result;
       }
@@ -1893,6 +1901,7 @@ class NetsService {
       flowName: 'NETS Card',
       retrySameEcn,
       onProgress,
+      context,
     });
   }
 
@@ -1900,10 +1909,13 @@ class NetsService {
    * Dedicated NETS QR Purchase Flow (FC 30 with T2="04")
    * Displays NETS Scan to Pay dynamic QR code on the Ingenico terminal display.
    */
-  async purchaseQr({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+  async purchaseQr({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
+    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
+    console.log(`[${new Date().toISOString()}] [PURCHASE_QR_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
+
     // Check for previous unresolved transactions before initiating new purchase
     if (!retrySameEcn) {
-      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
       if (priorReconciliation && priorReconciliation.isApproved) {
         return priorReconciliation.result;
       }
@@ -1916,6 +1928,7 @@ class NetsService {
       flowName: 'NETS QR',
       retrySameEcn,
       onProgress,
+      context,
     });
   }
 
@@ -1924,10 +1937,13 @@ class NetsService {
    * Official Specification: Section 4.8.1 - Credit Card Sale (Function Code I0), pages 82-84.
    * Supports Visa, Mastercard, AMEX with automatic BIN processing (Field 9G omitted).
    */
-  async purchaseCreditCard({ amount, ecrRef, retrySameEcn = null, onProgress = null }) {
+  async purchaseCreditCard({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
+    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
+    console.log(`[${new Date().toISOString()}] [PURCHASE_CREDIT_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
+
     // Check for previous unresolved transactions before initiating new purchase
     if (!retrySameEcn) {
-      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress);
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
       if (priorReconciliation && priorReconciliation.isApproved) {
         return priorReconciliation.result;
       }
@@ -1938,6 +1954,7 @@ class NetsService {
       ecrRef,
       retrySameEcn,
       onProgress,
+      context,
     });
   }
 

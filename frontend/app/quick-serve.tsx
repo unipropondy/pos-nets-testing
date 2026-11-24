@@ -1947,6 +1947,11 @@ export default function QuickServePOSScreen() {
 
       const activeTableId = selectedTable ? String(selectedTable.id || selectedTable.TableId || "") : "";
 
+      const cashierActionToken = `CAT_QS_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const paymentRequestId = `QS_REQ_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      console.log(`[${new Date().toISOString()}] [CASHIER_PAYMENT_CLICK] [QuickServe] Cashier clicked Pay for ${selectedPaymentMethod}, Amount=${finalTotal}, Token=${cashierActionToken}`);
+      console.log(`[${new Date().toISOString()}] [FRONTEND_API_REQUEST] [QuickServe] Endpoint=${endpoint}, RequestID=${paymentRequestId}, Token=${cashierActionToken}, Source=CASHIER_CLICK, Amount=${finalTotal}`);
+
       setTerminalModalVisible(true);
       setTerminalStatus("processing");
       setTerminalTitle("Waiting for NETS Terminal");
@@ -1960,6 +1965,9 @@ export default function QuickServePOSScreen() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "x-request-id": paymentRequestId,
+            "x-trigger-source": "CASHIER_CLICK",
+            "x-cashier-action": "true",
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
@@ -1968,6 +1976,8 @@ export default function QuickServePOSScreen() {
             isQr: isNetsQrMode,
             isCreditCard: isNetsCreditCardMode,
             tableId: activeTableId,
+            isCashierInitiated: true,
+            cashierActionToken,
           }),
         });
 
