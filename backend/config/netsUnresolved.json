@@ -1,16 +1,16 @@
 [
   {
-    "ecn": "000000017624",
-    "originalEcn": "000000017624",
-    "ecrRef": "1795516210049",
+    "ecn": "000000017634",
+    "originalEcn": "000000017634",
+    "ecrRef": "1795525055328",
     "amount": 1,
     "amountStr": "000000000100",
     "flowName": "NETS Card",
     "txnType": "01",
     "initialErrorCode": "ETIMEDOUT",
-    "initialErrorMessage": "Terminal communication timed out after 30 seconds",
+    "initialErrorMessage": "Terminal communication timed out after 120 seconds",
     "status": "UNRESOLVED",
-    "unresolvedReason": "Transaction timed out during original payment and recovery attempt. Status remains unknown on terminal. Manual reconciliation required. Do NOT recharge customer.",
-    "startedAt": "2026-11-24T10:42:39.135Z"
+    "unresolvedReason": "Original transaction timed out after physical LAN disconnect. Status unknown on terminal. Manual reconciliation required. Do NOT recharge customer.",
+    "startedAt": "2026-11-24T13:10:00.000Z"
   }
 ]
