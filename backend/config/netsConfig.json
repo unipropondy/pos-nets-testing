@@ -8,5 +8,8 @@
   "terminalId": "",
   "ecrRefFieldCode": "HD",
   "autoRetryWithSameEcn": true,
-  "lastApprovedQueryOnTimeout": true
+  "lastApprovedQueryOnTimeout": true,
+  "recoveryInitialDelayMs": 4000,
+  "recoveryRetryDelayMs": 2000,
+  "recoveryMaxRetries": 2
 }

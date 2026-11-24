@@ -100,6 +100,7 @@ function cleanupTestState() {
   await runAsyncTest('3, 4, 5, 6, 7. Original request timeout triggers POS-014 recovery with same ECN, preserving amount & ref', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for unit test
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 15;
     service.checkTerminalAvailabilityBeforePurchase = async () => {};
@@ -154,19 +155,7 @@ function cleanupTestState() {
       }
     };
 
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: 1.0,
-        ecrRef: '1795440395385',
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-    assert.ok(caughtErr, 'First call must fail due to timeout and preserve unresolved transaction');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Next payment action triggers on-demand recovery
+    // Single cashier purchase call executes both original FC30 and automatic recovery after timeout
     const res = await service.purchaseCard({
       amount: 1.0,
       ecrRef: '1795440395385',

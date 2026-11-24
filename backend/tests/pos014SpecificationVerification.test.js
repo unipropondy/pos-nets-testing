@@ -61,6 +61,7 @@ function cleanupTestState() {
   await runAsyncTest('POS-014: Original ECN 000000016729 recovered with same ECN without generating fresh ECNs', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast timeout for test execution
     // Enable autoRetryWithSameEcn for POS-014
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 20;
@@ -125,20 +126,7 @@ function cleanupTestState() {
       throw new Error(`Unexpected invocation ${sendPacketInvocation}`);
     };
 
-    // Step 1: Initiate purchase (encounters disconnect, leaves unresolved on disk)
-    let caughtErr = null;
-    try {
-      await service.purchaseCard({
-        amount: TARGET_AMOUNT,
-        ecrRef: TARGET_REF,
-      });
-    } catch (err) {
-      caughtErr = err;
-    }
-    assert.ok(caughtErr, 'First purchase attempt must fail due to LAN disconnect');
-    assert.strictEqual(caughtErr.code, 'ERECONCILIATIONREQUIRED');
-
-    // Step 2: Cashier initiates next payment action (which triggers on-demand reconciliation of unresolved record)
+    // Single cashier purchase call executes both initial FC30 and automatic recovery after timeout
     const result = await service.purchaseCard({
       amount: TARGET_AMOUNT,
       ecrRef: TARGET_REF,
@@ -248,6 +236,7 @@ function cleanupTestState() {
   await runAsyncTest('POS-014: Same-ECN transport timeout preserves UNKNOWN state and does NOT mark DECLINED/CANCELLED', async () => {
     cleanupTestState();
     const service = new NetsService();
+    service.config.financialTimeoutMs = 50; // Fast test timeout
     service.config.autoRetryWithSameEcn = true;
     service.config.recoveryInitialDelayMs = 10;
     service.checkTerminalAvailabilityBeforePurchase = async () => {};
