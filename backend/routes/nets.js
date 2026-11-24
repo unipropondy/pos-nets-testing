@@ -47,13 +47,22 @@ netsService.setTmsStateListener((tmsState) => {
 
 /**
  * GET /api/nets/config
- * Get current NETS terminal LAN configuration
+ * Get current NETS terminal LAN configuration and runtime diagnostics
  */
 router.get('/config', (req, res) => {
   res.json({
     success: true,
     config: netsService.config,
     currentEcn: netsService.getCurrentEcn(),
+    runtime: {
+      backendDir: __dirname,
+      financialTimeoutMs: netsService.config.financialTimeoutMs,
+      adminTimeoutMs: netsService.config.adminTimeoutMs,
+      autoRetryWithSameEcn: Boolean(netsService.config.autoRetryWithSameEcn),
+      lastApprovedQueryOnTimeout: Boolean(netsService.config.lastApprovedQueryOnTimeout),
+      unresolvedCount: netsService.unresolvedTransactions.length,
+      isUatOverride: Boolean(process.env.NETS_UAT_FINANCIAL_TIMEOUT_MS),
+    },
   });
 });
 

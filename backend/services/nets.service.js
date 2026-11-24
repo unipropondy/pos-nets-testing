@@ -47,19 +47,53 @@ class NetsService {
     this.isTmsUpdating = false;
     this.tmsPollTimeoutTimer = null;
     this.onTmsStateChange = null;
+
+    // Log startup diagnostics
+    this.logStartupDiagnostics();
+  }
+
+  /**
+   * Logs runtime diagnostics describing the active workspace process,
+   * config paths, timeouts, and recovery engine versions.
+   */
+  logStartupDiagnostics() {
+    const pkgVersion = (() => {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+        return pkg.version || 'unknown';
+      } catch {
+        return 'unknown';
+      }
+    })();
+
+    console.log('================================================================');
+    console.log('🚀 [NetsService] Active Workspace Runtime Diagnostics');
+    console.log(`   - Backend Source Dir       : ${__dirname}`);
+    console.log(`   - Application Version      : v${pkgVersion}`);
+    console.log(`   - NETS Config File Path    : ${CONFIG_FILE_PATH}`);
+    console.log(`   - Terminal IP / Port       : ${this.config.terminalIp}:${this.config.terminalPort}`);
+    console.log(`   - Financial Timeout        : ${this.config.financialTimeoutMs}ms (${this.config.financialTimeoutMs / 1000}s)`);
+    console.log(`   - Admin Timeout            : ${this.config.adminTimeoutMs}ms (${this.config.adminTimeoutMs / 1000}s)`);
+    console.log(`   - ECR Ref Field Code       : ${this.config.ecrRefFieldCode || 'HD'}`);
+    console.log(`   - POS-014 Same-ECN Recovery: ${this.config.autoRetryWithSameEcn ? 'ENABLED (Primary)' : 'DISABLED'}`);
+    console.log(`   - POS-013 FC56 Recovery    : ${this.config.lastApprovedQueryOnTimeout ? 'ENABLED (Fallback)' : 'DISABLED'}`);
+    console.log(`   - Active Unresolved Records: ${this.unresolvedTransactions.length}`);
+    console.log(`   - Current Persisted ECN    : ${this.getCurrentEcn()}`);
+    console.log('================================================================');
   }
 
   loadConfig() {
+    let cfg = {};
     try {
       if (fs.existsSync(CONFIG_FILE_PATH)) {
         const raw = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
-        return JSON.parse(raw);
+        cfg = JSON.parse(raw);
       }
     } catch (err) {
       console.error('[NetsService] Error loading config:', err.message);
     }
     // Default UAT / LAN settings
-    return {
+    const merged = {
       terminalIp: '192.168.9.38',
       terminalPort: 7500,
       financialTimeoutMs: 120000, // 2 minutes for payment/pin entry
@@ -74,7 +108,19 @@ class NetsService {
       recoveryInitialDelayMs: 4000, // 4s wait to allow LAN link restoration and terminal ECR reset
       recoveryRetryDelayMs: 2000,   // 2s between connection retries
       recoveryMaxRetries: 2,         // Maximum 2 additional retries (3 attempts total)
+      ...cfg,
     };
+
+    // Explicit UAT-only environment override for controlled timeout testing
+    if (process.env.NETS_UAT_FINANCIAL_TIMEOUT_MS) {
+      const uatTimeout = parseInt(process.env.NETS_UAT_FINANCIAL_TIMEOUT_MS, 10);
+      if (!isNaN(uatTimeout) && uatTimeout > 0) {
+        console.warn(`[NetsService] [UAT OVERRIDE] Active financialTimeoutMs overridden by env NETS_UAT_FINANCIAL_TIMEOUT_MS: ${uatTimeout}ms (Config was: ${merged.financialTimeoutMs}ms)`);
+        merged.financialTimeoutMs = uatTimeout;
+      }
+    }
+
+    return merged;
   }
 
   saveConfig(newConfig) {
@@ -471,10 +517,12 @@ class NetsService {
 
       // Total transaction timeout
       timer = setTimeout(() => {
-        const timeoutErr = new Error(`Terminal communication timed out after ${timeoutMs / 1000} seconds`);
+        const elapsed = Date.now() - startTime;
+        const timeoutErr = new Error(`Terminal communication timed out after ${timeoutMs / 1000} seconds (real elapsed: ${elapsed}ms)`);
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
         timeoutErr.requestDispatched = requestDispatched;
+        console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}: Fired after ${elapsed}ms (configured: ${timeoutMs}ms)`);
         finishError(timeoutErr);
       }, timeoutMs);
 
@@ -506,11 +554,12 @@ class NetsService {
       });
 
       socket.on('timeout', () => {
-        const timeoutErr = new Error(`NETS Terminal socket idle timed out after ${timeoutMs / 1000} seconds`);
+        const elapsed = Date.now() - startTime;
+        const timeoutErr = new Error(`NETS Terminal socket idle timed out after ${timeoutMs / 1000} seconds (real elapsed: ${elapsed}ms)`);
         timeoutErr.code = 'ETIMEDOUT';
         timeoutErr.isTimeout = true;
         timeoutErr.requestDispatched = requestDispatched;
-        console.warn(`[${new Date().toISOString()}] [NETS Socket] Socket idle timeout fired after ${timeoutMs / 1000}s (requestDispatched=${requestDispatched})`);
+        console.warn(`[${new Date().toISOString()}] [ORIGINAL_TIMEOUT] [Socket Idle] ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}: Fired after ${elapsed}ms (configured: ${timeoutMs}ms, requestDispatched=${requestDispatched})`);
         finishError(timeoutErr);
       });
 
@@ -556,7 +605,7 @@ class NetsService {
         const sockErr = new Error(`NETS Terminal socket error: ${err.message}`);
         sockErr.code = err.code || 'ESOCKET';
         sockErr.requestDispatched = requestDispatched;
-        console.error(`[${new Date().toISOString()}] [NETS Socket] Socket error event: ${err.message} (code=${sockErr.code})`);
+        console.error(`[${new Date().toISOString()}] [ORIGINAL_SOCKET_ERROR] ECN=${context.ecn || 'N/A'}, Ref=${context.ecrRef || 'N/A'}: ${err.message} (code=${sockErr.code})`);
         finishError(sockErr);
       });
 
@@ -776,6 +825,86 @@ class NetsService {
   }
 
   /**
+   * Bounded TCP probe to check if NETS terminal LAN port is reachable.
+   * Does NOT send any application frame or generate any ECN.
+   *
+   * @param {number} timeoutMs Connect probe timeout (default 2000ms)
+   * @returns {Promise<boolean>}
+   */
+  async probeTerminalTcpConnection(timeoutMs = 2000) {
+    // In mock testing environments where sendPacket is overridden, skip real socket probe
+    if (this._mockSendPacketActive || process.env.NODE_ENV === 'test') {
+      return true;
+    }
+    const { terminalIp, terminalPort } = this.config;
+    return new Promise((resolve) => {
+      const probeSocket = new net.Socket();
+      let resolved = false;
+
+      const finish = (isSuccess) => {
+        if (resolved) return;
+        resolved = true;
+        probeSocket.removeAllListeners();
+        probeSocket.destroy();
+        resolve(isSuccess);
+      };
+
+      probeSocket.setTimeout(timeoutMs);
+      probeSocket.on('timeout', () => finish(false));
+      probeSocket.on('error', () => finish(false));
+      probeSocket.connect(terminalPort, terminalIp, () => finish(true));
+    });
+  }
+
+  /**
+   * Waits for terminal LAN connectivity with bounded backoff polling.
+   * Avoids dispatching same-ECN recovery frames while physical LAN is unplugged.
+   *
+   * @param {number} maxWaitMs Maximum total time to wait for LAN (default 30000ms)
+   * @param {Function} onProgress Progress callback for UI notification
+   * @returns {Promise<boolean>}
+   */
+  async waitForTerminalLanConnectivity(maxWaitMs = 30000, onProgress = null) {
+    const start = Date.now();
+    let pollCount = 0;
+    const probeTimeout = Math.min(2000, maxWaitMs);
+    const probeInterval = 1000;
+
+    console.log(`[${new Date().toISOString()}] [LAN_PROBE_STARTED] Waiting for terminal LAN link availability (max ${maxWaitMs / 1000}s)...`);
+
+    while (true) {
+      pollCount++;
+      const isReachable = await this.probeTerminalTcpConnection(probeTimeout);
+      if (isReachable) {
+        const took = Date.now() - start;
+        console.log(`[${new Date().toISOString()}] [LAN_AVAILABLE] Terminal LAN link is ACTIVE (reachable at ${this.config.terminalIp}:${this.config.terminalPort}, poll #${pollCount}, took ${took}ms).`);
+        return true;
+      }
+
+      const elapsed = Date.now() - start;
+      if (elapsed >= maxWaitMs) {
+        break;
+      }
+
+      const remainingSec = Math.max(0, Math.round((maxWaitMs - elapsed) / 1000));
+      if (onProgress) {
+        onProgress({
+          status: 'recovery_wait',
+          message: `Terminal LAN is unreachable. Please reconnect LAN cable (waiting up to ${remainingSec}s)...`,
+        });
+      }
+      console.warn(`[${new Date().toISOString()}] [NetsService] [POS-014] Terminal LAN probe failed (poll #${pollCount}). Retrying in ${probeInterval}ms... (${remainingSec}s remaining)`);
+      const nextSleep = Math.min(probeInterval, Math.max(0, maxWaitMs - (Date.now() - start)));
+      if (nextSleep > 0) {
+        await this._delay(nextSleep);
+      }
+    }
+
+    console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] Terminal LAN wait timed out after ${maxWaitMs / 1000}s. Terminal remains unreachable.`);
+    return false;
+  }
+
+  /**
    * POS-014: Same-ECN Recovery Handler.
    * Recovers an uncertain transaction by resending the request using the SAME original ECN,
    * original amount, and original ECR reference number without generating a new ECN.
@@ -845,10 +974,37 @@ class NetsService {
       await this._delay(initialDelay);
     }
 
+    // POS-014: Check/Wait for LAN link availability before dispatching same-ECN recovery frame
+    // Ensures POS does not dispatch into a dead socket or abort before the user plugs LAN back in
+    const maxLanWaitMs = this.config.recoveryLanMaxWaitMs !== undefined ? this.config.recoveryLanMaxWaitMs : 30000;
+    const isLanReachable = await this.waitForTerminalLanConnectivity(maxLanWaitMs, onProgress);
+    if (!isLanReachable) {
+      console.error(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Terminal unreachable over LAN after ${maxLanWaitMs / 1000}s. Aborting same-ECN dispatch. Preserving UNKNOWN.`);
+      const lanUnreachableErr = new Error(`Terminal unreachable over LAN. Connection could not be re-established after ${maxLanWaitMs / 1000}s.`);
+      lanUnreachableErr.code = 'ETIMEDOUT';
+      this.isRecoveryInProgress = false;
+
+      recoveryAudit.status = 'UNRESOLVED';
+      recoveryAudit.unresolvedReason = `Same ECN recovery could not be dispatched: Terminal unreachable over LAN after ${maxLanWaitMs / 1000}s. Outcome is UNKNOWN.`;
+      recoveryAudit.lastTransportError = {
+        code: 'ETIMEDOUT',
+        message: lanUnreachableErr.message,
+      };
+      this.saveUnresolvedTransaction(recoveryAudit);
+
+      const unresErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${originalEcn}). Terminal unreachable after LAN disconnect. Manual reconciliation required. Do NOT recharge customer.`);
+      unresErr.code = 'ERECONCILIATIONREQUIRED';
+      unresErr.originalEcn = originalEcn;
+      unresErr.recoveryEcn = recoveryEcn;
+      unresErr.lastError = lanUnreachableErr;
+      unresErr.unresolved = recoveryAudit;
+      throw unresErr;
+    }
+
     if (onProgress) {
       onProgress({
         status: 'recovering',
-        message: `Recovering transaction using original ECN ${originalEcn}...`,
+        message: `LAN active. Recovering transaction using original ECN ${originalEcn}...`,
       });
     }
 
@@ -880,7 +1036,7 @@ class NetsService {
     }
 
     const txHex = frame.toString('hex').toUpperCase();
-    console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Dispatched: Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
+    console.log(`[${new Date().toISOString()}] [SAME_ECN_RECOVERY_TX] [${flowName}] Original ECN=${originalEcn}, Recovery ECN=${recoveryEcn}, Amount=${amount} (${amountStr}), Ref=${refNum}`);
     console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery TX Raw Hex (${frame.length} bytes): ${txHex}`);
 
     let recoveryRes = null;
@@ -891,6 +1047,8 @@ class NetsService {
         isQr: txnType === '04',
         txnType: txnType || '01',
         flowName,
+        ecn: recoveryEcn,
+        ecrRef: refNum,
       });
     } catch (err) {
       recoveryErr = err;
@@ -906,10 +1064,10 @@ class NetsService {
       const responseCode = recoveryRes.parsed.responseCode;
       const isApproved = recoveryRes.parsed.isApproved;
 
-      console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Recovery RX received (took ${duration}ms, RC=${responseCode}, isApproved=${isApproved}): ${sanitizeRawHex(rxHex)}`);
+      console.log(`[${new Date().toISOString()}] [RECOVERY_RX] [${flowName}] ECN=${recoveryEcn}, Ref=${refNum}, took=${duration}ms, RC=${responseCode}, isApproved=${isApproved}: ${sanitizeRawHex(rxHex)}`);
 
       if (isApproved) {
-        console.log(`[NetsService] [POS-014] [${flowName}] Transaction conclusively recovered and approved with same ECN ${originalEcn}!`);
+        console.log(`[${new Date().toISOString()}] [RECOVERED_APPROVED] [${flowName}] ECN=${originalEcn}, Ref=${refNum}, ApprovalCode=${recoveryRes.parsed.approvalCode || recoveryRes.parsed.fields['01'] || ''}`);
 
         // Clear only this matching unresolved record from persistence
         const unresList = this.loadUnresolvedTransactions();
@@ -1030,7 +1188,7 @@ class NetsService {
     }
 
     // Transport error during same ECN recovery: State remains UNKNOWN / UNRESOLVED
-    console.error(`[NetsService] [POS-014] [${flowName}] Same ECN recovery failed with transport error (${recoveryErr?.message}). Outcome remains UNKNOWN.`);
+    console.error(`[${new Date().toISOString()}] [UNRESOLVED] [${flowName}] ECN=${originalEcn}, Ref=${refNum}: Recovery failed with transport error (${recoveryErr?.message}). Outcome remains UNKNOWN.`);
 
     recoveryAudit.status = 'UNRESOLVED';
     recoveryAudit.unresolvedReason = `Same ECN recovery failed (${recoveryErr?.message}). Terminal status could not be verified. Outcome is UNKNOWN.`;
@@ -1749,6 +1907,7 @@ class NetsService {
 
       // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
       if (isApproved) {
+        console.log(`[${new Date().toISOString()}] [ORIGINAL_APPROVED] [${flowName}] ECN=${ecn}, Ref=${refNum}, ApprovalCode=${result.approvalCode}`);
         const unresList = this.loadUnresolvedTransactions();
         const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn || t.ecrRef === refNum);
         if (unresIdx >= 0) {
@@ -1796,7 +1955,14 @@ class NetsService {
         throw new Error('Terminal is currently busy. Please wait and try again.');
       }
 
-      const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
+      // POS-014 vs POS-013 Recovery Strategy Selection:
+      // CRITICAL SAFETY AUDIT: Only trigger recovery when the transaction outcome is GENUINELY uncertain.
+      const isUncertainOutcome = Boolean(
+        err.isTimeout ||
+        err.isUncertain ||
+        err.isPrematureClose ||
+        (err.requestDispatched && (err.code === 'ECONNRESET' || err.code === 'EUNCERTAIN_SOCKET_CLOSED' || err.code === 'ESOCKET' || err.code === 'EPIPE'))
+      );
 
       // POS-014 vs POS-013 Recovery Strategy Selection:
       // When autoRetryWithSameEcn is true, POS-014 same-ECN retransmission is executed (reusing original ECN).
@@ -1867,13 +2033,15 @@ class NetsService {
         fields,
       });
 
-      console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Frame Dispatched: ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
+      console.log(`[${new Date().toISOString()}] [ORIGINAL_FC30_TX] [${flowName}] ECN=${ecn}, Amount=${amount} (${amountStr}), Type=${txnType}, RefField=${refCode}, Ref=${refNum}`);
       console.log(`[${new Date().toISOString()}] [NetsService] [${flowName}] TX Raw Hex (${frame.length} bytes): ${frame.toString('hex').toUpperCase()}`);
 
       const res = await this.sendPacket(frame, this.config.financialTimeoutMs, onProgress, {
         isQr: txnType === '04',
         txnType,
         flowName,
+        ecn,
+        ecrRef: refNum,
       });
       this.isProcessing = false;
 
@@ -1906,6 +2074,7 @@ class NetsService {
 
       // POS-014: If transaction was approved, ensure any matching unresolved entry is cleared
       if (isApproved) {
+        console.log(`[${new Date().toISOString()}] [ORIGINAL_APPROVED] [${flowName}] ECN=${ecn}, Ref=${refNum}, ApprovalCode=${result.approvalCode}`);
         const unresList = this.loadUnresolvedTransactions();
         const unresIdx = unresList.findIndex(t => t.ecn === ecn || t.originalEcn === ecn || t.ecrRef === refNum);
         if (unresIdx >= 0) {
@@ -1956,9 +2125,15 @@ class NetsService {
       }
 
       // Handle Timeout / Uncertain outcome: POS-014 Same ECN Recovery vs POS-013 FC 56 Recovery
-      // Trigger recovery whenever the request was dispatched and outcome became uncertain
-      // (e.g. response timeout, socket reset/close, or parsing failure)
-      const isUncertainOutcome = (err.isTimeout || err.isUncertain || err.isPrematureClose || err.requestDispatched);
+      // CRITICAL SAFETY AUDIT: Only trigger recovery when the transaction outcome is GENUINELY uncertain.
+      // (e.g. response timeout, socket error/reset after request was dispatched, premature close, or frame parse error).
+      // If the request was never written to the socket (!err.requestDispatched), no recovery is needed (terminal never saw it).
+      const isUncertainOutcome = Boolean(
+        err.isTimeout ||
+        err.isUncertain ||
+        err.isPrematureClose ||
+        (err.requestDispatched && (err.code === 'ECONNRESET' || err.code === 'EUNCERTAIN_SOCKET_CLOSED' || err.code === 'ESOCKET' || err.code === 'EPIPE'))
+      );
 
       if (isUncertainOutcome && this.config.autoRetryWithSameEcn) {
         return await this._recoverWithSameEcn({

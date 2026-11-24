@@ -24,6 +24,7 @@ const UNRESOLVED_TEST_PATH = path.join(__dirname, '../config/netsUnresolved.test
 const AUDIT_TEST_PATH = path.join(__dirname, '../config/netsAuditHistory.test.json');
 process.env.NETS_UNRESOLVED_FILE_PATH = UNRESOLVED_TEST_PATH;
 process.env.NETS_AUDIT_FILE_PATH = AUDIT_TEST_PATH;
+process.env.NODE_ENV = 'test';
 
 const netsServiceModule = require('../services/nets.service');
 const NetsService = netsServiceModule.NetsService;

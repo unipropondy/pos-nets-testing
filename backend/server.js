@@ -798,9 +798,12 @@ const apiLimiter = rateLimit({
   message: { error: "Too many requests. Please try again in a few seconds." }
 });
 
-// ⏱️ API REQUEST TIMEOUT MIDDLEWARE (30s timeout)
+// ⏱️ API REQUEST TIMEOUT MIDDLEWARE (30s default timeout, bypassed for payment terminal endpoints)
 const requestTimeoutMiddleware = (req, res, next) => {
-  // Exclude long-lived payment terminal polling or reports if needed
+  // CRITICAL: Exclude long-lived payment terminal transactions (e.g. NETS card/pin prompt up to 120s, EOD settlement sequence)
+  if (req.originalUrl.startsWith("/api/nets") || req.originalUrl.startsWith("/api/yeahpay") || req.originalUrl.startsWith("/api/settlement")) {
+    return next();
+  }
   req.setTimeout(30000, () => {
     if (!res.headersSent) {
       res.status(504).json({ error: "Request timed out after 30 seconds" });
