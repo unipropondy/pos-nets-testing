@@ -42,6 +42,15 @@ try {
   fs.mkdirSync(backendDist, { recursive: true });
   fs.cpSync(frontendDist, backendDist, { recursive: true, force: true });
   console.log('Copied frontend build to backend/dist successfully!');
+  
+  // Sanitize CSS warnings across backend/dist
+  try {
+    const { processDirectory } = require('./clean-html-css');
+    processDirectory(backendDist);
+    processDirectory(frontendDist);
+  } catch (cleanErr) {
+    console.warn('CSS cleaning warning:', cleanErr.message);
+  }
 } catch (error) {
   console.error('Error copying files:', error.message);
   process.exit(1);

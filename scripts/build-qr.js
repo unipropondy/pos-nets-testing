@@ -93,6 +93,14 @@ try {
 </html>`;
   fs.writeFileSync(path.join(frontendQrDist, '404.html'), notFoundHtml, 'utf8');
 
+  // Sanitize CSS warnings (empty rulesets, standard appearance, unknown border-curve)
+  try {
+    const { processDirectory } = require('./clean-html-css');
+    processDirectory(frontendQrDist);
+  } catch (cleanErr) {
+    console.warn('CSS cleaning warning:', cleanErr.message);
+  }
+
   // Clean temporary directory
   fs.rmSync(tempDistDir, { recursive: true, force: true });
   console.log('✅ frontend/dist-qr prepared successfully with customer-only files.');
