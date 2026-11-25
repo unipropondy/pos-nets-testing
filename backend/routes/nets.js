@@ -275,7 +275,7 @@ router.post('/end-of-day', async (req, res) => {
 /**
  * Helper to process and broadcast payment transactions cleanly
  */
-async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, title, paymentMethodName }) {
+async function handlePaymentExecution(req, res, { isQr, isFlashPay = false, isCreditCard = false, title, paymentMethodName }) {
   const { amount, ecrRef, tableId = null, retrySameEcn = null, isCashierInitiated = false, cashierActionToken = null } = req.body;
   const requestId = req.headers['x-request-id'] || req.headers['x-client-request-id'] || 'REQ_' + Date.now();
   const triggerSource = req.headers['x-trigger-source'] || (isCashierInitiated ? 'CASHIER_CLICK' : 'UNKNOWN_CLIENT');
@@ -287,7 +287,7 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
     return res.status(400).json({ success: false, error: 'Valid amount is required.' });
   }
 
-  logComm('TX', title, { amount, ecrRef, isQr, isCreditCard, tableId, retrySameEcn, requestId, triggerSource });
+  logComm('TX', title, { amount, ecrRef, isQr, isFlashPay, isCreditCard, tableId, retrySameEcn, requestId, triggerSource });
 
   // Broadcast initial terminal payment status
   const waitingMessage = retrySameEcn
@@ -296,7 +296,9 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       ? 'Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal...'
       : isQr
         ? 'Presenting QR code on terminal...'
-        : 'Please tap, insert card or present mobile device on NETS terminal...';
+        : isFlashPay
+          ? 'Please tap NETS FlashPay card on terminal...'
+          : 'Please tap, insert NETS card on terminal...';
 
   if (io) {
     io.emit('terminal_payment_sync', {
@@ -342,6 +344,8 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
       result = await netsService.purchaseCreditCard(purchaseOpts);
     } else if (isQr) {
       result = await netsService.purchaseQr(purchaseOpts);
+    } else if (isFlashPay) {
+      result = await netsService.purchaseFlashPay(purchaseOpts);
     } else {
       result = await netsService.purchaseCard(purchaseOpts);
     }
@@ -457,13 +461,28 @@ async function handlePaymentExecution(req, res, { isQr, isCreditCard = false, ti
 /**
  * POST /api/nets/card-payment
  * Dedicated endpoint for NETS Card Payment (FC 30 T2=01)
- * Supports NETS Debit, Contactless, FlashPay, and chip/pin.
+ * Supports NETS Debit, Contactless NETS, and chip/pin (excluding FlashPay).
  */
 router.post('/card-payment', async (req, res) => {
   return handlePaymentExecution(req, res, {
     isQr: false,
+    isFlashPay: false,
     title: 'NETS Card Purchase (FC 30 T2=01)',
     paymentMethodName: 'NETS CARD'
+  });
+});
+
+/**
+ * POST /api/nets/flashpay-payment
+ * Dedicated endpoint for NETS FlashPay Payment (FC 30 T2=01)
+ * Dedicated flow for contactless NETS FlashPay / CEPAS cards.
+ */
+router.post('/flashpay-payment', async (req, res) => {
+  return handlePaymentExecution(req, res, {
+    isQr: false,
+    isFlashPay: true,
+    title: 'NETS FlashPay Purchase (FC 30 T2=01)',
+    paymentMethodName: 'NETS FLASHPAY'
   });
 });
 

@@ -11,6 +11,6 @@
   "lastApprovedQueryOnTimeout": true,
   "recoveryInitialDelayMs": 2000,
   "recoveryRetryDelayMs": 2000,
-  "recoveryMaxRetries": 1,
+  "recoveryMaxRetries": 0,
   "recoveryTimeoutMs": 35000
 }

@@ -1569,11 +1569,12 @@ export default function PaymentScreen() {
     const isYeahPayCardMode = _methodNorm === "YEAHPAY CARD";
     const isYeahPay        = isYeahPayPayNow || isYeahPayCardMode;
 
-    // Exact matching for NETS terminal modes: "NETS CARD", "NETS QR", and "NETS CREDIT CARD"
+    // Exact matching for NETS terminal modes: "NETS CARD", "NETS FLASHPAY", "NETS QR", and "NETS CREDIT CARD"
     const isNetsQrMode         = _methodNorm === "NETS QR" || _methodNorm === "NETSQR";
     const isNetsCardMode       = _methodNorm === "NETS CARD" || _methodNorm === "NETSCARD";
+    const isNetsFlashPayMode   = _methodNorm === "NETS FLASHPAY" || _methodNorm === "NETSFLASHPAY" || _methodNorm === "FLASHPAY";
     const isNetsCreditCardMode = _methodNorm === "NETS CREDIT CARD" || _methodNorm === "NETSCREDITCARD" || _methodNorm === "NETSCREDIT";
-    const isNets               = isNetsQrMode || isNetsCardMode || isNetsCreditCardMode;
+    const isNets               = isNetsQrMode || isNetsCardMode || isNetsFlashPayMode || isNetsCreditCardMode;
 
     // ==========================================
     // 💳 NETS ECR II DIRECT TERMINAL CALL (SEPARATE FLOWS)
@@ -1583,19 +1584,25 @@ export default function PaymentScreen() {
         ? '/api/nets/credit-card-payment'
         : isNetsQrMode
           ? '/api/nets/qr-payment'
-          : '/api/nets/card-payment';
+          : isNetsFlashPayMode
+            ? '/api/nets/flashpay-payment'
+            : '/api/nets/card-payment';
 
       const promptMsg = isNetsCreditCardMode
         ? "Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal..."
         : isNetsQrMode
           ? "Presenting QR code on NETS terminal..."
-          : "Please tap, insert NETS card or FlashPay on terminal...";
+          : isNetsFlashPayMode
+            ? "Please tap NETS FlashPay card on terminal..."
+            : "Please tap, insert NETS card on terminal...";
 
       const terminalDisplayName = isNetsCreditCardMode
         ? 'NETS Credit Card'
         : isNetsQrMode
           ? 'NETS QR'
-          : 'NETS Card';
+          : isNetsFlashPayMode
+            ? 'NETS FlashPay'
+            : 'NETS Card';
 
       const cashierActionToken = `CAT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       console.log(`[${new Date().toISOString()}] [CASHIER_PAYMENT_CLICK] Cashier clicked Pay for ${method}, Amount=${total}, Token=${cashierActionToken}`);
@@ -1758,7 +1765,9 @@ export default function PaymentScreen() {
             ? "Please insert, swipe or tap card on NETS terminal..."
             : isNetsQrMode
               ? "Presenting QR on NETS terminal..."
-              : "Please tap/insert card on NETS terminal...",
+              : isNetsFlashPayMode
+                ? "Please tap NETS FlashPay card on terminal..."
+                : "Please tap/insert card on NETS terminal...",
           method: method,
           total: total,
         });
@@ -2167,7 +2176,7 @@ export default function PaymentScreen() {
           // Terminal integrations: payment was already called directly, mark as pre-processed
           const _mNorm = method.trim().toUpperCase();
           const _isYeahPayFinal = _mNorm === "YEAHPAY PAYNOW" || _mNorm === "YEAHPAY CARD";
-          const _isNetsFinal = _mNorm === "NETS CARD" || _mNorm === "NETSCARD" || _mNorm === "NETS QR" || _mNorm === "NETSQR" || _mNorm === "NETS CREDIT CARD" || _mNorm === "NETSCREDITCARD" || _mNorm === "NETSCREDIT";
+          const _isNetsFinal = _mNorm === "NETS CARD" || _mNorm === "NETSCARD" || _mNorm === "NETS FLASHPAY" || _mNorm === "NETSFLASHPAY" || _mNorm === "FLASHPAY" || _mNorm === "NETS QR" || _mNorm === "NETSQR" || _mNorm === "NETS CREDIT CARD" || _mNorm === "NETSCREDITCARD" || _mNorm === "NETSCREDIT";
           finalPayments.push({
             payModeId,
             payMode: method,
@@ -3394,13 +3403,16 @@ export default function PaymentScreen() {
                           const mUpper = pmNormalize(m.payMode);
                           const isNetsQr = mUpper === "NETS QR" || mUpper === "NETSQR";
                           const isNetsCard = mUpper === "NETS CARD" || mUpper === "NETSCARD";
+                          const isNetsFlashPay = mUpper === "NETS FLASHPAY" || mUpper === "NETSFLASHPAY" || mUpper === "FLASHPAY";
                           const isNetsCreditCard = mUpper === "NETS CREDIT CARD" || mUpper === "NETSCREDITCARD" || mUpper === "NETSCREDIT";
                           const subtitle = isNetsQr
                             ? "Scan to Pay"
                             : isNetsCreditCard
                             ? "Visa / Master / AMEX"
+                            : isNetsFlashPay
+                            ? "FlashPay / CEPAS"
                             : isNetsCard
-                            ? "Tap / Insert / FlashPay"
+                            ? "Tap / Insert / PIN"
                             : null;
 
                           return (
@@ -3422,7 +3434,7 @@ export default function PaymentScreen() {
                                 ]}
                               >
                                 <FontAwesome5
-                                  name={isNetsQr ? "qrcode" : (isNetsCard || isNetsCreditCard) ? "credit-card" : m.icon}
+                                  name={isNetsQr ? "qrcode" : (isNetsCard || isNetsFlashPay || isNetsCreditCard) ? "credit-card" : m.icon}
                                   size={isMobile ? 15 : 18}
                                   color={
                                     isSelected ? "#fff" :

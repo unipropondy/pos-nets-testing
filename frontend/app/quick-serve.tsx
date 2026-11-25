@@ -1920,30 +1920,37 @@ export default function QuickServePOSScreen() {
       return;
     }
 
-    // 2. Terminal Payment Flow for NETS (NETS CARD, NETS QR & NETS CREDIT CARD)
+    // 2. Terminal Payment Flow for NETS (NETS CARD, NETS FLASHPAY, NETS QR & NETS CREDIT CARD)
     const isNetsQrMode = normMethod === "NETS QR" || normMethod === "NETSQR";
     const isNetsCreditCardMode = normMethod === "NETS CREDIT CARD" || normMethod === "NETSCREDITCARD" || normMethod === "NETSCREDIT";
-    const isNetsCardMode = normMethod === "NETS CARD" || normMethod === "NETSCARD" || normMethod === "NETS";
-    const isNets = isNetsQrMode || isNetsCardMode || isNetsCreditCardMode;
+    const isNetsFlashPayMode = normMethod === "NETS FLASHPAY" || normMethod === "NETSFLASHPAY" || normMethod === "FLASHPAY";
+    const isNetsCardMode = !isNetsFlashPayMode && (normMethod === "NETS CARD" || normMethod === "NETSCARD" || normMethod === "NETS");
+    const isNets = isNetsQrMode || isNetsCardMode || isNetsFlashPayMode || isNetsCreditCardMode;
 
     if (isNets) {
       const endpoint = isNetsCreditCardMode
         ? "/api/nets/credit-card-payment"
         : isNetsQrMode
           ? "/api/nets/qr-payment"
-          : "/api/nets/card-payment";
+          : isNetsFlashPayMode
+            ? "/api/nets/flashpay-payment"
+            : "/api/nets/card-payment";
 
       const promptMsg = isNetsCreditCardMode
         ? "Please insert, swipe or tap Credit Card (Visa/Master/AMEX) on terminal..."
         : isNetsQrMode
           ? "Presenting QR code on NETS terminal..."
-          : "Please tap, insert NETS card or FlashPay on terminal...";
+          : isNetsFlashPayMode
+            ? "Please tap NETS FlashPay card on terminal..."
+            : "Please tap, insert NETS card on terminal...";
 
       const terminalDisplayName = isNetsCreditCardMode
         ? "NETS Credit Card"
         : isNetsQrMode
           ? "NETS QR"
-          : "NETS Card";
+          : isNetsFlashPayMode
+            ? "NETS FlashPay"
+            : "NETS Card";
 
       const activeTableId = selectedTable ? String(selectedTable.id || selectedTable.TableId || "") : "";
 

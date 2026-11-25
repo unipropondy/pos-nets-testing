@@ -1821,13 +1821,15 @@ class NetsService {
     if (inquiry) {
       const inqRef = (inquiry.fields['HS'] || inquiry.fields['HD'] || '').trim();
       const refNumTrim = refNum.trim();
-      const isRefMatched = inqRef === refNumTrim || 
+      const isRefMatched = Boolean(inqRef) && (
+                           inqRef === refNumTrim || 
                            inqRef.replace(/^0+/, '') === refNumTrim.replace(/^0+/, '') ||
                            inqRef.endsWith(refNumTrim) || 
-                           refNumTrim.endsWith(inqRef);
+                           refNumTrim.endsWith(inqRef));
       const inqAmountStr = (inquiry.fields['40'] || '').trim();
-      const isAmountMatched = inqAmountStr === amountStr ||
-                              parseInt(inqAmountStr || '0', 10) === parseInt(amountStr || '0', 10);
+      const isAmountMatched = Boolean(inqAmountStr) && (
+                              inqAmountStr === amountStr ||
+                              parseInt(inqAmountStr || '0', 10) === parseInt(amountStr || '0', 10));
 
       // SCENARIO A: Conclusive Approval Match
       if (inquiry.success && isRefMatched && isAmountMatched && inquiry.parsed.isApproved) {
@@ -1879,12 +1881,34 @@ class NetsService {
         return recoveredResult;
       }
 
-      // SCENARIO B: Inquiry succeeded but returned a NON-MATCHING transaction
+      // GUARD: If FC56 response fields are empty, missing, or unparseable, NEVER classify as confirmed decline or clear unresolved records.
+      // Retain UNRESOLVED and require manual reconciliation.
+      if (!inqRef || !inqAmountStr) {
+        console.error(`[NetsService] [POS-014] [${flowName}] FC 56 returned incomplete/unparseable reference or amount (inqRef='${inqRef}', inqAmt='${inqAmountStr}'). Cannot establish transaction identity. Retaining UNRESOLVED state.`);
+        
+        recoveryAudit.status = 'UNRESOLVED';
+        recoveryAudit.unresolvedReason = `FC 56 returned incomplete or unparseable fields (inqRef='${inqRef}', inqAmt='${inqAmountStr}'). Terminal status remains UNKNOWN. Retaining UNRESOLVED state.`;
+        recoveryAudit.lastTransportError = {
+          code: 'EUNPARSEABLE_FC56',
+          message: 'FC 56 response missing or unparseable reference/amount',
+        };
+
+        this.saveUnresolvedTransaction(recoveryAudit);
+
+        const ambigErr = new Error(`Transaction outcome unknown for ${flowName} (ECN=${originalEcn}). FC 56 inquiry fields could not be conclusively parsed. Transaction preserved for reconciliation. Do NOT recharge customer.`);
+        ambigErr.code = 'ERECONCILIATIONREQUIRED';
+        ambigErr.originalEcn = originalEcn;
+        ambigErr.recoveryAttempts = recoveryAudit.recoveryAttempts;
+        ambigErr.unresolved = recoveryAudit;
+        throw ambigErr;
+      }
+
+      // SCENARIO B: Inquiry succeeded with valid terminal fields but returned a NON-MATCHING transaction
       // POS-013 Test Specification Expectation:
-      // When FC 56 succeeds and confirms the terminal's last approved transaction does NOT match
+      // When FC 56 succeeds and confirms the terminal's last approved transaction conclusively does NOT match
       // this transaction (different reference or amount), the original transaction was NOT approved on the terminal.
       // In accordance with the test specification, POS marks the original payment as UNSUCCESSFUL.
-      console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 returned non-matching transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}'). Terminal confirmed transaction was NOT approved. Marking original payment UNSUCCESSFUL.`);
+      console.warn(`[NetsService] [POS-013] [${flowName}] FC 56 returned conclusive non-matching transaction (inqRef='${inqRef}', expected='${refNum}', inqAmt='${inqAmountStr}', expected='${amountStr}'). Terminal confirmed transaction was NOT approved. Marking original payment UNSUCCESSFUL.`);
 
       const unsuccessfulResult = {
         ecn: originalEcn,
@@ -2273,10 +2297,10 @@ class NetsService {
 
   /**
    * Dedicated NETS Card Purchase Flow (FC 30 with T2="01")
-   * Supports: NETS Chip, Tap, Magnetic Stripe, and FlashPay contactless cards.
+   * Supports: NETS Chip, Tap, Magnetic Stripe (L7 must be NETS / NETS DEBIT / NETS EFTPOS, NOT FLASHPAY).
    */
   async purchaseCard({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
-    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated };
+    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated, expectedFlow: 'NETS Card' };
     console.log(`[${new Date().toISOString()}] [PURCHASE_CARD_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
 
     // If an unresolved transaction exists, reconcile it on cashier's explicit payment action
@@ -2292,6 +2316,33 @@ class NetsService {
       ecrRef,
       txnType: '01',
       flowName: 'NETS Card',
+      retrySameEcn,
+      onProgress,
+      context,
+    });
+  }
+
+  /**
+   * Dedicated NETS FlashPay Purchase Flow (FC 30 with T2="01")
+   * Supports: Contactless NETS FlashPay cards (L7 must contain FLASHPAY).
+   */
+  async purchaseFlashPay({ amount, ecrRef, retrySameEcn = null, onProgress = null, isCashierInitiated = false, cashierActionToken = null, requestId = null, triggerSource = 'UNKNOWN' }) {
+    const context = { requestId: requestId || 'REQ_' + Date.now(), triggerSource, cashierActionToken, isCashierInitiated, expectedFlow: 'NETS FlashPay' };
+    console.log(`[${new Date().toISOString()}] [PURCHASE_FLASHPAY_ENTER] RequestID=${context.requestId}, Source=${triggerSource}, CashierAction=${Boolean(isCashierInitiated)}, Token=${cashierActionToken || 'NONE'}, Amount=${amount}, ECRRef=${ecrRef}`);
+
+    // If an unresolved transaction exists, reconcile it on cashier's explicit payment action
+    if (!retrySameEcn) {
+      const priorReconciliation = await this.reconcileUnresolvedBeforeNextPurchase(onProgress, context);
+      if (priorReconciliation && priorReconciliation.isApproved) {
+        return priorReconciliation.result;
+      }
+    }
+
+    return this._executePurchaseTransaction({
+      amount,
+      ecrRef,
+      txnType: '01',
+      flowName: 'NETS FlashPay',
       retrySameEcn,
       onProgress,
       context,
@@ -2716,6 +2767,43 @@ class NetsService {
         fields: res.parsed.fields,
         rawHex: res.rawHex,
       };
+
+      // Validate Card Type (Field L7 / D8) against selected Payment Flow
+      const rawCardLabel = (res.parsed.fields['L7'] || res.parsed.fields['D8'] || res.parsed.fields['D7'] || '').trim().toUpperCase();
+      if (isApproved && (flowName === 'NETS Card' || flowName === 'NETS FlashPay')) {
+        const isFlashPayCard = rawCardLabel.includes('FLASHPAY');
+        if (flowName === 'NETS FlashPay' && !isFlashPayCard) {
+          console.error(`[${new Date().toISOString()}] [CARD_TYPE_MISMATCH] Flow=${flowName}, CardLabel='${rawCardLabel}', ECN=${ecn}, Ref=${refNum}. Customer presented non-FlashPay card for NETS FlashPay.`);
+          if (linkMonitor) linkMonitor.stop();
+          const mismatchErr = new Error(`Card presented (${rawCardLabel || 'NETS Card'}) is not a NETS FlashPay card. Please select NETS Card or have customer tap a FlashPay card.`);
+          mismatchErr.code = 'ECARDTYPEMISMATCH';
+          mismatchErr.cardLabel = rawCardLabel;
+          mismatchErr.expectedFlow = flowName;
+          mismatchErr.terminalResult = result;
+          this.recordAuditHistory({
+            ...result,
+            status: 'CARD_TYPE_MISMATCH',
+            cardLabel: rawCardLabel,
+            mismatchReason: mismatchErr.message,
+          });
+          throw mismatchErr;
+        } else if (flowName === 'NETS Card' && isFlashPayCard) {
+          console.error(`[${new Date().toISOString()}] [CARD_TYPE_MISMATCH] Flow=${flowName}, CardLabel='${rawCardLabel}', ECN=${ecn}, Ref=${refNum}. Customer presented FlashPay card for NETS Card.`);
+          if (linkMonitor) linkMonitor.stop();
+          const mismatchErr = new Error(`Customer presented a NETS FlashPay card for NETS Card payment. Please select NETS FlashPay payment mode.`);
+          mismatchErr.code = 'ECARDTYPEMISMATCH';
+          mismatchErr.cardLabel = rawCardLabel;
+          mismatchErr.expectedFlow = flowName;
+          mismatchErr.terminalResult = result;
+          this.recordAuditHistory({
+            ...result,
+            status: 'CARD_TYPE_MISMATCH',
+            cardLabel: rawCardLabel,
+            mismatchReason: mismatchErr.message,
+          });
+          throw mismatchErr;
+        }
+      }
 
       // CRITICAL REQUIREMENT 3: Handle Approval Received After a Detected Disconnect
       const disconnectObserved = Boolean(linkMonitor && linkMonitor.isDisconnectObserved);

@@ -1,0 +1,24 @@
+[
+  {
+    "ecn": "000000017622",
+    "originalEcn": "000000017622",
+    "recoveryEcn": "000000017622",
+    "ecrRef": "1795511667370",
+    "amount": 1.5,
+    "amountStr": "000000000150",
+    "flowName": "NETS Card",
+    "txnType": "01",
+    "recoveryCommandType": "FC 30 (Same ECN)",
+    "initialErrorCode": "ETIMEDOUT",
+    "initialErrorMessage": "Terminal communication timed out after 25 seconds (real elapsed: 25007ms)",
+    "startedAt": "2026-11-24T09:15:25.526Z",
+    "recoveryAttempts": [],
+    "status": "UNRESOLVED",
+    "unresolvedReason": "Same ECN recovery failed (Terminal communication timed out after 25 seconds (real elapsed: 25008ms)). Terminal status could not be verified. Outcome is UNKNOWN.",
+    "lastTransportError": {
+      "code": "ETIMEDOUT",
+      "message": "Terminal communication timed out after 25 seconds (real elapsed: 25008ms)"
+    },
+    "duration": 29026
+  }
+]

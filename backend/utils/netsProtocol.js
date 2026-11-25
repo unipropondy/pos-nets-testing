@@ -335,10 +335,98 @@ function parseNetsFrame(buffer, options = {}) {
     rawFields.push({ code, length: fieldLen, value: strVal, raw: fieldDataBuf });
   }
 
+  // 5a. If Function Code is 56 (Last Approved Transaction Inquiry) and Field TD (Transaction Data) is present,
+  // parse the encapsulated transaction packet inside TD according to NETS ECR II specifications.
+  let nestedTransaction = null;
+  if ((functionCode === '56' || fields['TD']) && fields['TD']) {
+    const tdRawObj = rawFields.find(f => f.code === 'TD');
+    const tdBuf = tdRawObj ? tdRawObj.raw : Buffer.from(fields['TD'], 'latin1');
+
+    if (tdBuf && tdBuf.length >= 18) {
+      try {
+        const nestedEcn = tdBuf.slice(0, 12).toString('ascii');
+        const nestedFc = tdBuf.slice(12, 14).toString('ascii');
+        const nestedRc = tdBuf.slice(14, 16).toString('ascii');
+        const nestedRfu = tdBuf.slice(16, 17).toString('ascii');
+        const nestedFs = tdBuf[17];
+
+        const nestedFields = {};
+        const nestedRawFields = [];
+        let tdOffset = 18;
+
+        while (tdOffset < tdBuf.length) {
+          if (tdOffset + 4 > tdBuf.length) break;
+          const nCode = tdBuf.slice(tdOffset, tdOffset + 2).toString('ascii');
+          const nFieldLen = fromBcd2(tdBuf, tdOffset + 2);
+          tdOffset += 4;
+
+          let nFieldDataBuf = Buffer.alloc(0);
+          if (nFieldLen > 0) {
+            if (tdOffset + nFieldLen > tdBuf.length) break;
+            nFieldDataBuf = tdBuf.slice(tdOffset, tdOffset + nFieldLen);
+            tdOffset += nFieldLen;
+          }
+
+          if (tdOffset < tdBuf.length && tdBuf[tdOffset] === FS) {
+            tdOffset += 1;
+          }
+
+          const nStrVal = nFieldDataBuf.toString('ascii');
+          nestedFields[nCode] = nStrVal;
+          nestedRawFields.push({ code: nCode, length: nFieldLen, value: nStrVal, raw: nFieldDataBuf });
+        }
+
+        const nestedApprovalValidation = validateApprovalStatus(nestedFc, nestedRc, nestedFields, context);
+
+        nestedTransaction = {
+          ecn: nestedEcn,
+          functionCode: nestedFc,
+          responseCode: nestedRc,
+          rfu: nestedRfu,
+          isApproved: nestedApprovalValidation.isApproved,
+          approvalReason: nestedApprovalValidation.reason,
+          approvalCode: nestedFields['01'] || '',
+          hostResponseCode: nestedFields['HC'] || '',
+          responseDescription: getNetsResponseDescription(nestedRc),
+          fields: nestedFields,
+          rawFields: nestedRawFields,
+        };
+
+        // Merge nested transaction fields onto top-level fields if top-level does not have them
+        // This ensures downstream consumers expecting fields['HD'], fields['40'], fields['01'] seamlessly resolve them
+        for (const [key, val] of Object.entries(nestedFields)) {
+          if (!fields[key]) {
+            fields[key] = val;
+          }
+        }
+      } catch (tdErr) {
+        // Log or preserve error in nestedTransaction
+        nestedTransaction = {
+          error: tdErr.message,
+          fields: {},
+        };
+      }
+    }
+  }
+
   // 6. Strict Approval Status Evaluation
-  const approvalValidation = validateApprovalStatus(functionCode, responseCode, fields, context);
-  const approvalCode = fields['01'] || '';
-  const hostResponseCode = fields['HC'] || '';
+  // For FC 56: If a nested transaction was parsed from TD, determine approval from the nested transaction
+  let approvalValidation;
+  let approvalCode;
+  let hostResponseCode;
+
+  if (functionCode === '56' && nestedTransaction && !nestedTransaction.error) {
+    approvalValidation = {
+      isApproved: responseCode === '00' && nestedTransaction.isApproved,
+      reason: responseCode === '00' ? nestedTransaction.approvalReason : `FC56 inquiry response code is ${responseCode} (${getNetsResponseDescription(responseCode)})`,
+    };
+    approvalCode = nestedTransaction.approvalCode || fields['01'] || '';
+    hostResponseCode = nestedTransaction.hostResponseCode || fields['HC'] || '';
+  } else {
+    approvalValidation = validateApprovalStatus(functionCode, responseCode, fields, context);
+    approvalCode = fields['01'] || '';
+    hostResponseCode = fields['HC'] || '';
+  }
 
   return {
     rawLength: expectedBodyAndLrcLen,
@@ -357,6 +445,7 @@ function parseNetsFrame(buffer, options = {}) {
     responseDescription: getNetsResponseDescription(responseCode),
     fields,
     rawFields,
+    nestedTransaction,
   };
 }
 

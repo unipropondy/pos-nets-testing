@@ -139,6 +139,12 @@ const isNetsCardMode = (modeName: string): boolean => {
   return norm === "NETS CARD" || norm === "NETSCARD";
 };
 
+/** true ONLY for NETS FLASHPAY */
+const isNetsFlashPayMode = (modeName: string): boolean => {
+  const norm = normalizeMode(modeName);
+  return norm === "NETS FLASHPAY" || norm === "NETSFLASHPAY" || norm === "FLASHPAY";
+};
+
 /** true ONLY for NETS QR */
 const isNetsQrMode = (modeName: string): boolean => {
   const norm = normalizeMode(modeName);
@@ -152,7 +158,7 @@ const isNetsCreditCardMode = (modeName: string): boolean => {
 };
 
 const isNetsTerminal = (modeName: string): boolean =>
-  isNetsCardMode(modeName) || isNetsQrMode(modeName) || isNetsCreditCardMode(modeName);
+  isNetsCardMode(modeName) || isNetsFlashPayMode(modeName) || isNetsQrMode(modeName) || isNetsCreditCardMode(modeName);
 
 /** Modes that trigger a terminal call.
  *  YeahPay modes and NETS modes qualify. */
@@ -622,28 +628,35 @@ const handleGenerateQR = async (row: SplitPaymentRow) => {
     );
 
     // ==========================================
-    // 💳 NETS CARD / NETS QR / NETS CREDIT CARD SPLIT PAYMENT FLOW (SEPARATE ENDPOINTS)
+    // 💳 NETS CARD / NETS FLASHPAY / NETS QR / NETS CREDIT CARD SPLIT PAYMENT FLOW (SEPARATE ENDPOINTS)
     // ==========================================
     if (isNetsTerminal(row.payMode)) {
       const isQr = isNetsQrMode(row.payMode);
       const isCredit = isNetsCreditCardMode(row.payMode);
+      const isFlashPay = isNetsFlashPayMode(row.payMode);
       const endpoint = isCredit
         ? '/api/nets/credit-card-payment'
         : isQr
           ? '/api/nets/qr-payment'
-          : '/api/nets/card-payment';
+          : isFlashPay
+            ? '/api/nets/flashpay-payment'
+            : '/api/nets/card-payment';
 
       const promptMsg = isCredit
         ? "Please insert, swipe or tap Credit Card on terminal..."
         : isQr
           ? "Presenting QR on NETS terminal..."
-          : "Please tap/insert card on NETS terminal...";
+          : isFlashPay
+            ? "Please tap NETS FlashPay card on terminal..."
+            : "Please tap/insert card on NETS terminal...";
 
       const terminalDisplayName = isCredit
         ? 'NETS Credit Card'
         : isQr
           ? 'NETS QR'
-          : 'NETS Card';
+          : isFlashPay
+            ? 'NETS FlashPay'
+            : 'NETS Card';
 
       console.log(`🔄 [SplitPayment] Calling NETS endpoint: ${endpoint} for: ${row.payMode} (isCredit: ${isCredit}, isQr: ${isQr}, amount: ${amt})`);
 
