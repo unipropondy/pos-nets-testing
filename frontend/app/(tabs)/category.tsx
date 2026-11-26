@@ -1,9 +1,10 @@
 import CalendarPicker from "@/components/CalendarPicker";
 import FloorPlanBrandLogo from "@/components/FloorPlanBrandLogo";
-import { socket } from "@/constants/socket";
+import { FloorPlanTable } from "@/components/FloorPlanTable";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { API_URL } from "@/constants/Config";
 import { Fonts } from "@/constants/Fonts";
+import { socket } from "@/constants/socket";
 import { Theme } from "@/constants/theme";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -11,8 +12,9 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Modal,
   Platform,
@@ -24,10 +26,7 @@ import {
   TouchableOpacity,
   TouchableWithoutFeedback,
   useWindowDimensions,
-  View,
-  Animated,
-  Easing,
-  ImageBackground,
+  View
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import {
@@ -36,7 +35,6 @@ import {
 } from "react-native-safe-area-context";
 import { useToast } from "../../components/Toast";
 import WindowControls from "../../components/WindowControls";
-import { FloorPlanTable } from "@/components/FloorPlanTable";
 import {
   formatToSingaporeTime,
   getSingaporeDateString,
@@ -55,10 +53,10 @@ import {
   setCurrentContext,
   useCartStore,
 } from "@/stores/cartStore";
+import { useCompanySettingsStore } from "@/stores/companySettingsStore";
 import { useGeneralSettingsStore } from "@/stores/generalSettingsStore";
 import { getHeldOrders } from "@/stores/heldOrdersStore";
 import { useNotificationStore } from "@/stores/notificationStore";
-import { useCompanySettingsStore } from "@/stores/companySettingsStore";
 import { clearOrderContext, OrderContext, setOrderContext, useOrderContextStore } from "@/stores/orderContextStore";
 import { usePaymentSettingsStore } from "@/stores/paymentSettingsStore";
 import { Image } from "expo-image";
@@ -886,7 +884,7 @@ const TableItemComponent = React.memo(
     }
 
     const offset = 5; // gap between table edge and chair
-    
+
     // Override AVAILABLE colors for premium beige look matching reference
     let activeColor = status === 0 ? "#D1C7BD" : ui.color;
     let activeBg = status === 0 ? "#FAF8F5" : ui.lightBg;
@@ -924,7 +922,7 @@ const TableItemComponent = React.memo(
         }
       }
     }
-    
+
     // Label color mapping for high-readability text
     if (backgroundTheme === "light") {
       labelColor = "#000000";
@@ -958,12 +956,12 @@ const TableItemComponent = React.memo(
           const angle = (i * 2 * Math.PI) / seatsCount - Math.PI / 2; // start from top
           const x = cx + (rx + radiusOffset) * Math.cos(angle) - chairSize / 2;
           const y = cy + (ry + radiusOffset) * Math.sin(angle) - chairSize / 2;
-          
+
           // Rotation so backrest (top border) faces outwards
           const rotationAngle = angle + Math.PI / 2;
-          chairPositions.push({ 
-            x, 
-            y, 
+          chairPositions.push({
+            x,
+            y,
             rotate: `${rotationAngle}rad`,
             backrestStyle: { top: 0, left: 0, right: 0, height: 2.2, borderTopLeftRadius: 1.5, borderTopRightRadius: 1.5 }
           });
@@ -1161,9 +1159,9 @@ const TableItemComponent = React.memo(
           <Text
             style={[
               styles.tableNumber,
-              { 
-                fontSize: isVacant ? numberFont * 1.08 : numberFont * 0.95, 
-                color: "#111827", 
+              {
+                fontSize: isVacant ? numberFont * 1.08 : numberFont * 0.95,
+                color: "#111827",
                 fontWeight: "900",
                 marginTop: 0,
                 marginBottom: isVacant ? 0 : 2,
@@ -1180,8 +1178,8 @@ const TableItemComponent = React.memo(
               <View
                 style={[
                   styles.statusChip,
-                  { 
-                    backgroundColor: "transparent", 
+                  {
+                    backgroundColor: "transparent",
                     borderColor: cardBorderColor,
                     borderWidth: 1,
                     paddingHorizontal: 6,
@@ -1320,26 +1318,26 @@ const TableItemComponent = React.memo(
         />
 
 
-          {/* 🟢 LIVE TERMINAL INDICATOR: top-left spinner for processing, circular red error badge when cancelled/failed */}
-          {terminalStatus && terminalStatus !== "idle" && (
-            <TouchableOpacity
-              style={[
-                styles.terminalProcessingBadge,
-                (terminalStatus === "cancelled" || terminalStatus === "failed") &&
-                  styles.terminalErrorBadge,
-              ]}
-              onPress={(e) => {
-                e.stopPropagation();
-                useTerminalPaymentStore.getState().clearSession(tableId);
-              }}
-            >
-              {terminalStatus === "processing" ? (
-                <RotatingSyncIcon size={20} color="#3b82f6" />
-              ) : (
-                <Ionicons name="alert" size={16} color="#ffffff" />
-              )}
-            </TouchableOpacity>
-          )}
+        {/* 🟢 LIVE TERMINAL INDICATOR: top-left spinner for processing, circular red error badge when cancelled/failed */}
+        {terminalStatus && terminalStatus !== "idle" && (
+          <TouchableOpacity
+            style={[
+              styles.terminalProcessingBadge,
+              (terminalStatus === "cancelled" || terminalStatus === "failed") &&
+              styles.terminalErrorBadge,
+            ]}
+            onPress={(e) => {
+              e.stopPropagation();
+              useTerminalPaymentStore.getState().clearSession(tableId);
+            }}
+          >
+            {terminalStatus === "processing" ? (
+              <RotatingSyncIcon size={20} color="#3b82f6" />
+            ) : (
+              <Ionicons name="alert" size={16} color="#ffffff" />
+            )}
+          </TouchableOpacity>
+        )}
       </TouchableOpacity>
     );
   },
@@ -2117,119 +2115,119 @@ export default function Category() {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
         const data = await response.json();
-      let tablesArray: any[] = [];
-      if (Array.isArray(data)) tablesArray = data;
-      else if (data?.data && Array.isArray(data.data)) tablesArray = data.data;
-      else if (data?.recordset && Array.isArray(data.recordset))
-        tablesArray = data.recordset;
+        let tablesArray: any[] = [];
+        if (Array.isArray(data)) tablesArray = data;
+        else if (data?.data && Array.isArray(data.data)) tablesArray = data.data;
+        else if (data?.recordset && Array.isArray(data.recordset))
+          tablesArray = data.recordset;
 
-      if (tablesArray.length > 0) {
-        const convertedData: TableItem[] = tablesArray.map((item: any) => ({
-          id: String(item.TableId || item.id || "")
-            .replace(/^\{|\}$/g, "")
-            .trim()
-            .toLowerCase(),
-          label: item.TableNumber || item.label,
-          DiningSection: Number(item.DiningSection) || 1,
-          Status: Number(item.Status) || 0,
-          StartTime: item.StartTime,
-          lockedByName: item.lockedByName,
-          totalAmount: Number(item.totalAmount) || 0,
-          currentOrderId: item.currentOrderId,
-          isOvertime: Number(item.isOvertime) || 0,
-          isHoldOvertime: Number(item.isHoldOvertime) || 0,
-          lastModified: item.ModifiedOn,
-          entryStatus: item.entryStatus || item.entry_status,
-          paymentStatus: Number(item.paymentStatus) || 0,
-          customerName: item.customerName || item.CustomerName || null,
-          pax: item.pax || item.Pax || null,
-          TableType: item.TableType,
-          Seats: item.Seats !== undefined && item.Seats !== null ? Number(item.Seats) : undefined,
-          XSize: item.XSize !== undefined && item.XSize !== null ? Number(item.XSize) : undefined,
-          YSize: item.YSize !== undefined && item.YSize !== null ? Number(item.YSize) : undefined,
-          XPos: item.XPos !== undefined && item.XPos !== null ? Number(item.XPos) : undefined,
-          YPos: item.YPos !== undefined && item.YPos !== null ? Number(item.YPos) : undefined,
-        }));
+        if (tablesArray.length > 0) {
+          const convertedData: TableItem[] = tablesArray.map((item: any) => ({
+            id: String(item.TableId || item.id || "")
+              .replace(/^\{|\}$/g, "")
+              .trim()
+              .toLowerCase(),
+            label: item.TableNumber || item.label,
+            DiningSection: Number(item.DiningSection) || 1,
+            Status: Number(item.Status) || 0,
+            StartTime: item.StartTime,
+            lockedByName: item.lockedByName,
+            totalAmount: Number(item.totalAmount) || 0,
+            currentOrderId: item.currentOrderId,
+            isOvertime: Number(item.isOvertime) || 0,
+            isHoldOvertime: Number(item.isHoldOvertime) || 0,
+            lastModified: item.ModifiedOn,
+            entryStatus: item.entryStatus || item.entry_status,
+            paymentStatus: Number(item.paymentStatus) || 0,
+            customerName: item.customerName || item.CustomerName || null,
+            pax: item.pax || item.Pax || null,
+            TableType: item.TableType,
+            Seats: item.Seats !== undefined && item.Seats !== null ? Number(item.Seats) : undefined,
+            XSize: item.XSize !== undefined && item.XSize !== null ? Number(item.XSize) : undefined,
+            YSize: item.YSize !== undefined && item.YSize !== null ? Number(item.YSize) : undefined,
+            XPos: item.XPos !== undefined && item.XPos !== null ? Number(item.XPos) : undefined,
+            YPos: item.YPos !== undefined && item.YPos !== null ? Number(item.YPos) : undefined,
+          }));
 
-        const uniqueTables = convertedData.filter(
-          (item, index, self) =>
-            index === self.findIndex((t) => t.id === item.id),
-        );
-
-        setAllTables((prev) => {
-          if (prev.length !== uniqueTables.length) return uniqueTables;
-          const isSame = prev.every(
-            (t, i) =>
-              t.id === uniqueTables[i].id &&
-              t.label === uniqueTables[i].label &&
-              t.XPos === uniqueTables[i].XPos &&
-              t.YPos === uniqueTables[i].YPos &&
-              t.XSize === uniqueTables[i].XSize &&
-              t.YSize === uniqueTables[i].YSize &&
-              t.TableType === uniqueTables[i].TableType &&
-              t.Status === uniqueTables[i].Status &&
-              t.Seats === uniqueTables[i].Seats &&
-              t.totalAmount === uniqueTables[i].totalAmount &&
-              t.StartTime === uniqueTables[i].StartTime
+          const uniqueTables = convertedData.filter(
+            (item, index, self) =>
+              index === self.findIndex((t) => t.id === item.id),
           );
-          return isSame ? prev : uniqueTables;
-        });
 
-        // 🚀 BATCH SYNC to global store (MUCH FASTER)
-        const updates = uniqueTables.map((t) => {
-          let finalStartTime = 0;
-          if (t.StartTime) {
-            const parsed = parseDatabaseDate(t.StartTime).getTime();
-            if (!isNaN(parsed)) finalStartTime = parsed;
-          }
+          setAllTables((prev) => {
+            if (prev.length !== uniqueTables.length) return uniqueTables;
+            const isSame = prev.every(
+              (t, i) =>
+                t.id === uniqueTables[i].id &&
+                t.label === uniqueTables[i].label &&
+                t.XPos === uniqueTables[i].XPos &&
+                t.YPos === uniqueTables[i].YPos &&
+                t.XSize === uniqueTables[i].XSize &&
+                t.YSize === uniqueTables[i].YSize &&
+                t.TableType === uniqueTables[i].TableType &&
+                t.Status === uniqueTables[i].Status &&
+                t.Seats === uniqueTables[i].Seats &&
+                t.totalAmount === uniqueTables[i].totalAmount &&
+                t.StartTime === uniqueTables[i].StartTime
+            );
+            return isSame ? prev : uniqueTables;
+          });
 
-          return {
-            tableId: t.id,
-            section: getSectionFromDiningSection(t.DiningSection),
-            tableNo: t.label,
-            orderId: (t as any).currentOrderId || "EMPTY",
-            status: (t.Status === 5
-              ? "LOCKED"
-              : t.Status === 1
-                ? "SENT"
-                : t.Status === 2
-                  ? "BILL_REQUESTED"
-                  : t.Status === 3
-                    ? "HOLD"
-                    : "EMPTY") as TableStatusType,
-            startTime: finalStartTime,
-            lockedByName: t.lockedByName,
-            totalAmount: t.totalAmount,
-            isHoldOvertime: t.isHoldOvertime === 1 || !!t.isHoldOvertime,
-            lastModified: (t as any).lastModified,
-            entryStatus: t.entryStatus ?? undefined,
-            paymentStatus: t.paymentStatus ?? 0,
-            customerName: t.customerName ?? undefined,
-            pax: t.pax ?? undefined,
-          };
-        });
+          // 🚀 BATCH SYNC to global store (MUCH FASTER)
+          const updates = uniqueTables.map((t) => {
+            let finalStartTime = 0;
+            if (t.StartTime) {
+              const parsed = parseDatabaseDate(t.StartTime).getTime();
+              if (!isNaN(parsed)) finalStartTime = parsed;
+            }
 
-        useTableStatusStore.getState().batchUpdateTableStatus(updates);
-        cachedAllTables = uniqueTables;
-      } else {
-        throw new Error("No tables returned from API");
+            return {
+              tableId: t.id,
+              section: getSectionFromDiningSection(t.DiningSection),
+              tableNo: t.label,
+              orderId: (t as any).currentOrderId || "EMPTY",
+              status: (t.Status === 5
+                ? "LOCKED"
+                : t.Status === 1
+                  ? "SENT"
+                  : t.Status === 2
+                    ? "BILL_REQUESTED"
+                    : t.Status === 3
+                      ? "HOLD"
+                      : "EMPTY") as TableStatusType,
+              startTime: finalStartTime,
+              lockedByName: t.lockedByName,
+              totalAmount: t.totalAmount,
+              isHoldOvertime: t.isHoldOvertime === 1 || !!t.isHoldOvertime,
+              lastModified: (t as any).lastModified,
+              entryStatus: t.entryStatus ?? undefined,
+              paymentStatus: t.paymentStatus ?? 0,
+              customerName: t.customerName ?? undefined,
+              pax: t.pax ?? undefined,
+            };
+          });
+
+          useTableStatusStore.getState().batchUpdateTableStatus(updates);
+          cachedAllTables = uniqueTables;
+        } else {
+          throw new Error("No tables returned from API");
+        }
+      } catch (error) {
+        Alert.alert(
+          "Connection Error",
+          `Failed to connect to server at ${API_URL}\n\nPlease ensure the backend server is running.`,
+          [{ text: "OK" }],
+        );
+        if (!cachedAllTables || cachedAllTables.length === 0) {
+          setAllTables([]);
+        }
+      } finally {
+        inFlightTablesPromise = null;
+        setLoading(false);
       }
-    } catch (error) {
-      Alert.alert(
-        "Connection Error",
-        `Failed to connect to server at ${API_URL}\n\nPlease ensure the backend server is running.`,
-        [{ text: "OK" }],
-      );
-      if (!cachedAllTables || cachedAllTables.length === 0) {
-        setAllTables([]);
-      }
-    } finally {
-      inFlightTablesPromise = null;
-      setLoading(false);
-    }
-  })();
+    })();
 
-  return inFlightTablesPromise;
+    return inFlightTablesPromise;
   };
 
   const confirmUnlock = (tableId: string, tableLabel: string) => {
@@ -3141,11 +3139,10 @@ export default function Category() {
                 source={{
                   uri:
                     companyInfo.CompanyLogoUrl.startsWith("http") ||
-                    companyInfo.CompanyLogoUrl.startsWith("data:")
+                      companyInfo.CompanyLogoUrl.startsWith("data:")
                       ? companyInfo.CompanyLogoUrl
-                      : `${API_URL}${
-                          companyInfo.CompanyLogoUrl.startsWith("/") ? "" : "/"
-                        }${companyInfo.CompanyLogoUrl}`,
+                      : `${API_URL}${companyInfo.CompanyLogoUrl.startsWith("/") ? "" : "/"
+                      }${companyInfo.CompanyLogoUrl}`,
                 }}
                 style={{ width: 38, height: 38, borderRadius: 8 }}
                 contentFit="contain"
@@ -5329,7 +5326,7 @@ export default function Category() {
             </View>
           ) : (
             <View style={{ flex: 1 }} onLayout={onContainerLayout}>
-              <ScrollView 
+              <ScrollView
                 contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
                 showsVerticalScrollIndicator={false}
                 style={{ flex: 1 }}
@@ -5383,9 +5380,9 @@ export default function Category() {
                 </CanvasBackground>
               </ScrollView>
             </View>
-        )}
-      </View>
-    )}
+          )}
+        </View>
+      )}
       {/* 〰〰〰〰〰〰〰〰〰〰〰 CUSTOMER GUEST & PAX MODAL 〰〰〰〰〰〰〰〰〰〰〰 */}
       <Modal
         visible={guestModalVisible}

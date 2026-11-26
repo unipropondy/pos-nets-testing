@@ -522,9 +522,9 @@ export default function QuickServePOSScreen() {
     useGeneralSettingsStore((s: any) => s.settings?.menuNavigationMode) || "scroll";
 
   // Dish Group Pagination (when menuNavigationMode === 'prev_next')
-  // 2 columns x 7 rows to display up to 14 dish groups per page
+  // 2 columns x 6 rows = 12 dish groups per page (prevents clipping, fits viewport perfectly)
   const [groupPage, setGroupPage] = useState<number>(1);
-  const GROUPS_PER_PAGE = 14;
+  const GROUPS_PER_PAGE = 12;
 
   // Dish Group Vertical Scroll Navigation Ref and Measurements
   const dishGroupScrollRef = useRef<ScrollView>(null);
@@ -1231,7 +1231,7 @@ export default function QuickServePOSScreen() {
     scrollDishesToTop();
   };
 
-  // Dish Group Pagination Calculations (2 cols x 7 rows = 14 groups per page)
+  // Dish Group Pagination Calculations (2 cols x 6 rows = 12 groups per page)
   const currentKitchenGroups = allDishGroups.length > 0 ? allDishGroups : (dishGroups.length > 0 ? dishGroups : groups);
   const totalGroupPages = Math.max(1, Math.ceil(currentKitchenGroups.length / GROUPS_PER_PAGE));
   const safeGroupPage = Math.min(Math.max(1, groupPage), totalGroupPages);
@@ -1243,7 +1243,7 @@ export default function QuickServePOSScreen() {
       return currentKitchenGroups.slice(startIdx, startIdx + GROUPS_PER_PAGE);
     }
     return currentKitchenGroups;
-  }, [menuNavigationMode, currentKitchenGroups, safeGroupPage]);
+  }, [menuNavigationMode, currentKitchenGroups, safeGroupPage, GROUPS_PER_PAGE]);
 
   // Company Settings & Dynamic Tax Calculations
   const companySettings = useCompanySettingsStore((state: any) => state.settings);
@@ -3148,8 +3148,11 @@ export default function QuickServePOSScreen() {
               <ScrollView
                 ref={dishGroupScrollRef}
                 style={styles.dishGroupScroll}
-                contentContainerStyle={styles.dishGroupScrollContent}
-                showsVerticalScrollIndicator={false}
+                contentContainerStyle={[
+                  styles.dishGroupScrollContent,
+                  menuNavigationMode === "prev_next" && { flexGrow: 1, paddingBottom: 6 },
+                ]}
+                showsVerticalScrollIndicator={menuNavigationMode === "scroll"}
                 nestedScrollEnabled
                 scrollEnabled={menuNavigationMode === "scroll"}
                 onScroll={(e) => setDishGroupScrollOffset(e.nativeEvent.contentOffset.y)}
@@ -3165,7 +3168,7 @@ export default function QuickServePOSScreen() {
 
                     return (
                       <TouchableOpacity
-                        key={group.DishGroupId}
+                        key={String(group.DishGroupId || group.id || groupName)}
                         style={[
                           styles.dishGroupCard2Col,
                           isGroupActive && styles.dishGroupCard2ColActive,
@@ -3238,7 +3241,7 @@ export default function QuickServePOSScreen() {
             </View>
 
             {/* DISH GROUPS PAGINATION BAR (ONLY IN PREVIOUS / NEXT MODE) */}
-            {menuNavigationMode === "prev_next" && displayedDishGroups.length > 0 && (
+            {menuNavigationMode === "prev_next" && currentKitchenGroups.length > 0 && (
               <View style={styles.groupsPaginationBar}>
                 <View style={styles.paginationLeft}>
                   <TouchableOpacity
@@ -3261,9 +3264,15 @@ export default function QuickServePOSScreen() {
                 </View>
 
                 <View style={styles.paginationCenter}>
-                  <Text style={styles.paginationText}>
+                  <Text style={styles.paginationText} numberOfLines={1}>
                     Page <Text style={styles.paginationCurrentText}>{safeGroupPage}</Text> of{" "}
                     <Text style={styles.paginationTotalText}>{totalGroupPages}</Text>
+                    {currentKitchenGroups.length > 0 && (
+                      <Text style={styles.paginationSubtext}>
+                        {"  "}({Math.min(currentKitchenGroups.length, (safeGroupPage - 1) * GROUPS_PER_PAGE + 1)}-
+                        {Math.min(currentKitchenGroups.length, safeGroupPage * GROUPS_PER_PAGE)} of {currentKitchenGroups.length})
+                      </Text>
+                    )}
                   </Text>
                 </View>
 
@@ -6065,9 +6074,9 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: "#FECDD3",
     borderRadius: 12,
-    paddingVertical: 9,
-    paddingHorizontal: 14,
-    height: 50,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    height: 44,
     shadowColor: "#E11D48",
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -6133,16 +6142,17 @@ const styles = StyleSheet.create({
   },
   dishGroupScroll: {
     flex: 1,
-    paddingLeft: 8,
-    paddingRight: 4,
-    paddingVertical: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
   dishGroupScrollContent: {
-    paddingBottom: 8,
+    paddingBottom: 6,
   },
   dishGroupGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
+    justifyContent: "space-between",
+    alignItems: "stretch",
     gap: 6,
   },
   dishGroupCard2Col: {
@@ -6150,13 +6160,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#F8FAFC",
     borderRadius: 10,
     paddingHorizontal: 8,
-    paddingVertical: 9,
-    minHeight: 48,
+    paddingVertical: 8,
+    minHeight: 44,
     borderWidth: 1,
     borderColor: "#F1F5F9",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    boxSizing: "border-box" as any,
   },
   dishGroupCard2ColActive: {
     backgroundColor: "#FF5A16",
@@ -6507,7 +6518,7 @@ const styles = StyleSheet.create({
 
   /* DISH GROUPS BOTTOM PAGINATION BAR */
   groupsPaginationBar: {
-    height: 34,
+    height: 38,
     flexShrink: 0,
     borderTopWidth: 1,
     borderTopColor: "#E2E8F0",

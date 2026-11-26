@@ -147,10 +147,10 @@ const DishCard = React.memo(
               isLandscape
                 ? { width: 18, height: 18, borderRadius: 9 }
                 : isPhone
-                ? { width: 22, height: 22, borderRadius: 11 }
-                : isTablet
-                ? { width: 32, height: 32, borderRadius: 16 }
-                : null,
+                  ? { width: 22, height: 22, borderRadius: 11 }
+                  : isTablet
+                    ? { width: 32, height: 32, borderRadius: 16 }
+                    : null,
             ]}
           >
             <Text
@@ -159,10 +159,10 @@ const DishCard = React.memo(
                 isLandscape
                   ? { fontSize: 9.5 }
                   : isPhone
-                  ? { fontSize: 11 }
-                  : isTablet
-                  ? { fontSize: 15 }
-                  : null,
+                    ? { fontSize: 11 }
+                    : isTablet
+                      ? { fontSize: 15 }
+                      : null,
               ]}
             >
               {cartQty}
@@ -175,15 +175,15 @@ const DishCard = React.memo(
             isLandscape
               ? { width: 38, height: 38, marginBottom: 3, borderRadius: 19 }
               : isPhone
-              ? { width: 48, height: 48, marginBottom: 4 }
-              : isTablet
-              ? {
-                  width: 75,
-                  height: 75,
-                  marginBottom: 6,
-                  borderRadius: 37.5,
-                }
-              : null,
+                ? { width: 48, height: 48, marginBottom: 4 }
+                : isTablet
+                  ? {
+                    width: 75,
+                    height: 75,
+                    marginBottom: 6,
+                    borderRadius: 37.5,
+                  }
+                  : null,
           ]}
         >
           {dish.Image ? (
@@ -238,10 +238,10 @@ const DishCard = React.memo(
             isLandscape
               ? { fontSize: 10.5, minHeight: 24, lineHeight: 12 }
               : isPhone
-              ? { fontSize: 11, minHeight: 42, lineHeight: 14 }
-              : isTablet
-              ? { fontSize: 13, minHeight: 48, lineHeight: 16 }
-              : null,
+                ? { fontSize: 11, minHeight: 42, lineHeight: 14 }
+                : isTablet
+                  ? { fontSize: 13, minHeight: 48, lineHeight: 16 }
+                  : null,
           ]}
           numberOfLines={2}
         >
@@ -253,10 +253,10 @@ const DishCard = React.memo(
             isLandscape
               ? { fontSize: 11.5, marginTop: 1 }
               : isPhone
-              ? { fontSize: 12 }
-              : isTablet
-              ? { fontSize: 14 }
-              : null,
+                ? { fontSize: 12 }
+                : isTablet
+                  ? { fontSize: 14 }
+                  : null,
           ]}
         >
           {(() => {
@@ -1726,8 +1726,8 @@ export default function MenuScreen() {
                         {debouncedSearch.trim()
                           ? `Search Results for "${debouncedSearch.trim()}"`
                           : selectedGroup
-                          ? `${groups.find((g) => String(g.DishGroupId) === String(selectedGroup))?.DishGroupName || "Dish Group"} Dishes`
-                          : "Menu Dishes"}
+                            ? `${groups.find((g) => String(g.DishGroupId) === String(selectedGroup))?.DishGroupName || "Dish Group"} Dishes`
+                            : "Menu Dishes"}
                       </Text>
                       {filteredItems.length > 0 && (
                         <View style={styles.dishCountBadge}>
