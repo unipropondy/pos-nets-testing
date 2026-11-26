@@ -87,7 +87,7 @@ router.post('/config', (req, res) => {
     const updated = netsService.saveConfig({
       terminalIp: terminalIp || netsService.config.terminalIp,
       terminalPort: terminalPort ? parseInt(terminalPort, 10) : netsService.config.terminalPort,
-      financialTimeoutMs: financialTimeoutMs ? Math.max(120000, parseInt(financialTimeoutMs, 10)) : (netsService.config.financialTimeoutMs || 120000),
+      financialTimeoutMs: financialTimeoutMs ? Math.max(90000, parseInt(financialTimeoutMs, 10)) : (netsService.config.financialTimeoutMs || 90000),
       adminTimeoutMs: adminTimeoutMs ? parseInt(adminTimeoutMs, 10) : netsService.config.adminTimeoutMs,
       ecrRefFieldCode: ecrRefFieldCode ? ecrRefFieldCode.toUpperCase().slice(0, 2) : netsService.config.ecrRefFieldCode,
     });

@@ -95,15 +95,15 @@ class NetsService {
       console.error('[NetsService] Error loading config:', err.message);
     }
     // Default UAT / LAN settings
-        // Ensure config from file has valid numeric financialTimeoutMs of at least 120000ms
-    if (cfg && cfg.financialTimeoutMs && (typeof cfg.financialTimeoutMs !== 'number' || cfg.financialTimeoutMs < 120000)) {
-      console.warn('[NetsService] [CONFIG WARNING] Loaded financialTimeoutMs was below required 120000ms. Overriding to 120000ms.');
-      cfg.financialTimeoutMs = 120000;
+    // Ensure config from file has valid numeric financialTimeoutMs of at least 90000ms
+    if (cfg && cfg.financialTimeoutMs && (typeof cfg.financialTimeoutMs !== 'number' || cfg.financialTimeoutMs < 90000)) {
+      console.warn('[NetsService] [CONFIG WARNING] Loaded financialTimeoutMs was below required 90000ms. Overriding to 90000ms.');
+      cfg.financialTimeoutMs = 90000;
     }
     const merged = {
       terminalIp: '192.168.9.38',
       terminalPort: 7500,
-      financialTimeoutMs: 120000, // 2 minutes for payment/pin entry
+      financialTimeoutMs: 90000, // 90 seconds for payment/pin entry (POS-013 / POS-014)
       adminTimeoutMs: 35000,       // 35 seconds for admin/status
       connectionTimeoutMs: 10000,  // 10s TCP connect timeout
       merchantId: '',
@@ -621,7 +621,7 @@ class NetsService {
    */
   async sendPacket(frameBuffer, timeoutMs = 35000, onProgress = null, context = {}) {
     // POS-014 Spec Enforcement: If this is a financial transaction or financial recovery,
-    // strictly enforce that timeoutMs cannot be less than configured financialTimeoutMs (120000ms).
+    // strictly enforce that timeoutMs cannot be less than configured financialTimeoutMs (90000ms).
     const isFinancialTxn = context.isFinancial ||
       context.isRecovery ||
       ['01', '04', 'I0', '30'].includes(context.txnType) ||
@@ -1457,7 +1457,7 @@ class NetsService {
     const retryDelay = this.config.recoveryRetryDelayMs !== undefined ? this.config.recoveryRetryDelayMs : 2000;
     const maxRetries = this.config.recoveryMaxRetries !== undefined ? this.config.recoveryMaxRetries : 2;
     const totalAttempts = 1 + maxRetries;
-    const recoveryTimeout = this.config.recoveryTimeoutMs || this.config.financialTimeoutMs || 120000;
+    const recoveryTimeout = this.config.recoveryTimeoutMs || this.config.financialTimeoutMs || 90000;
 
     try {
       for (let attempt = 1; attempt <= totalAttempts; attempt++) {
@@ -2509,7 +2509,7 @@ class NetsService {
 
         // Wait out the remainder of the original financial timeout to enforce deadline
         const elapsedSinceStart = Date.now() - startTime;
-        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 90000;
         if (elapsedSinceStart < totalTimeoutTarget) {
           const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
           console.log(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_WAITING] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Waiting ${remainingWaitMs}ms to enforce complete ${totalTimeoutTarget}ms financial deadline...`);
@@ -2626,7 +2626,7 @@ class NetsService {
 
       if (isUncertainOutcome && ecn) {
         const elapsedSinceStart = Date.now() - startTime;
-        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 90000;
         if (elapsedSinceStart < totalTimeoutTarget) {
           const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
           console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Request was in-flight on terminal. Socket closed/erred (${err.message}). Waiting out remaining financial timeout (${remainingWaitMs}ms of ${totalTimeoutTarget}ms)...`);
@@ -2813,7 +2813,7 @@ class NetsService {
 
         // Wait out the remainder of the original financial timeout to enforce deadline
         const elapsedSinceStart = Date.now() - startTime;
-        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 90000;
         if (elapsedSinceStart < totalTimeoutTarget) {
           const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
           console.log(`[${new Date().toISOString()}] [ORIGINAL_DEADLINE_WAITING] RequestID=${requestId}, ECN=${ecn}, Ref=${refNum}: Waiting ${remainingWaitMs}ms to enforce complete ${totalTimeoutTarget}ms financial deadline...`);
@@ -2939,7 +2939,7 @@ class NetsService {
         // the transaction is still actively in-flight on the Ingenico terminal.
         // POS MUST wait until the configured financialTimeoutMs genuinely elapses!
         const elapsedSinceStart = Date.now() - startTime;
-        const totalTimeoutTarget = this.config.financialTimeoutMs || 120000;
+        const totalTimeoutTarget = this.config.financialTimeoutMs || 90000;
         if (elapsedSinceStart < totalTimeoutTarget) {
           const remainingWaitMs = totalTimeoutTarget - elapsedSinceStart;
           console.log(`[${new Date().toISOString()}] [NetsService] [POS-014] [${flowName}] Request was in-flight on terminal. Socket closed/erred (${err.message}). Waiting out remaining financial timeout (${remainingWaitMs}ms of ${totalTimeoutTarget}ms)...`);
